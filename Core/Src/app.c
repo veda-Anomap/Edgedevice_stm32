@@ -11,7 +11,7 @@ extern TIM_HandleTypeDef htim3;
 #define ADC_BUF_LEN    200      // DMA가 한 번에 모을 데이터 개수 (L: 100개, R: 100개)
 uint16_t adc_buffer[ADC_BUF_LEN]; // 쏟아지는 마이크 값을 담을 빈 박스
 
-#define DIFF_TH        220U     // 두 채널 레벨 차이 기준
+#define DIFF_TH        300U     // 두 채널 레벨 차이 기준
 #define ALPHA_DIV      4U       // IIR 필터 부드러움 정도
 #define SWITCH_HOLDOFF 40U      // 방향 토글 방지(반사/노이즈) ms
 
