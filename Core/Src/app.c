@@ -6,7 +6,7 @@
 /* main.c에서 생성된 HAL 핸들 */
 extern ADC_HandleTypeDef hadc1;
 extern TIM_HandleTypeDef htim3;
-
+//
 /*
  * 앱 오케스트레이션:
  * - mic 모듈: DMA 기반 마이크 신호 처리 + 방향 감지
