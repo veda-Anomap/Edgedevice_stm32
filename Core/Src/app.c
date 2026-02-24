@@ -155,6 +155,49 @@ void app_init(void)
            HAL_RCC_GetPCLK1Freq()*2); // APB1 prescaler가 /2일 때 TIM클럭은 x2
 
 }
+//
+/* ==============================================================
+ * 5. DMA 인터럽트 콜백 함수 (배열이 200개 꽉 찰 때마다 알아서 실행됨)
+ * ============================================================== */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
+{
+    if(hadc->Instance == ADC1) {
+
+        // ① 최초 1회 영점(Baseline) 캘리브레이션
+        if (!is_calibrated) {
+            uint32_t sumL = 0, sumR = 0;
+            // 배열을 훑으며 평균을 구합니다 (짝수: L, 홀수: R)
+            for(int i = 0; i < ADC_BUF_LEN; i += 2) {
+                sumL += adc_buffer[i];
+                sumR += adc_buffer[i+1];
+            }
+            baseL = sumL / (ADC_BUF_LEN / 2);
+            baseR = sumR / (ADC_BUF_LEN / 2);
+            is_calibrated = 1; // 캘리브레이션 끝!
+            return;
+        }
+
+        // ② 배열 안에서 가장 큰 소리(Peak) 찾기
+        uint32_t max_magL = 0;
+        uint32_t max_magR = 0;
+
+        for(int i = 0; i < ADC_BUF_LEN; i += 2) {
+            uint32_t magL = u32_abs_diff(adc_buffer[i], baseL);
+            uint32_t magR = u32_abs_diff(adc_buffer[i+1], baseR);
+
+            if(magL > max_magL) max_magL = magL;
+            if(magR > max_magR) max_magR = magR;
+        }
+
+        // ③ 찾아낸 최고 볼륨을 IIR 필터에 통과 (부드럽게 만들기)
+        lvlL = lvlL + (uint32_t)(((int32_t)max_magL - (int32_t)lvlL) / (int32_t)ALPHA_DIV);
+        lvlR = lvlR + (uint32_t)(((int32_t)max_magR - (int32_t)lvlR) / (int32_t)ALPHA_DIV);
+    }
+}
+
+
+
+
 
 void app_loop(void)
 {
