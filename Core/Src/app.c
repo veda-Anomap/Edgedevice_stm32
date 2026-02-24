@@ -11,7 +11,9 @@ extern TIM_HandleTypeDef htim3;
 #define ADC_BUF_LEN    200      // DMA가 한 번에 모을 데이터 개수 (L: 100개, R: 100개)
 uint16_t adc_buffer[ADC_BUF_LEN]; // 쏟아지는 마이크 값을 담을 빈 박스
 
-#define DIFF_TH        300U     // 두 채널 레벨 차이 기준
+// 하드웨어 민감도 조절 변수 (터미널 값 보고 조절)
+#define SOUND_TH       400U     // [추가] 이 숫자보다 작은 소리 무시 (전체 볼륨 기준)
+#define DIFF_TH        220U     // 두 채널 레벨 차이 기준
 #define ALPHA_DIV      4U       // IIR 필터 부드러움 정도
 #define SWITCH_HOLDOFF 40U      // 방향 토글 방지(반사/노이즈) ms
 
@@ -19,6 +21,7 @@ uint16_t adc_buffer[ADC_BUF_LEN]; // 쏟아지는 마이크 값을 담을 빈 �
 static volatile uint32_t baseL = 0, baseR = 0;
 static volatile uint32_t lvlL = 0,  lvlR = 0;
 static volatile uint8_t is_calibrated = 0; // 영점 조절 완료 플래그
+static volatile uint32_t peakL = 0, peakR = 0;  // [추가] 디버그 확인용 순수 ADC 변화량(최대값)측정
 
 static char detectLR = '-';
 static uint32_t last_switch_ms = 0;
@@ -30,7 +33,9 @@ static uint32_t last_switch_ms = 0;
 #define SERVO_RIGHT_US  1820u
 #define SERVO_CENTER_US 1520u
 #define SERVO_RUN_MS    200u
-#define DIR_COOLDOWN_MS 400u
+
+// 🛡️ [추가] 한 번 움직인 서보모터 추후 재감지까지의 최소시간 (1500 = 1.5초)
+#define DIR_COOLDOWN_MS 1500u
 
 static uint32_t motor_lock_until_ms = 0;
 static char last_dir = '-';
@@ -72,7 +77,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
 {
     if(hadc->Instance == ADC1) {
 
-        // ① 최초 1회 영점(Baseline) 캘리브레이션
+        // 최초 1회 영점(Baseline) 캘리브레이션
         if (!is_calibrated) {
             uint32_t sumL = 0, sumR = 0;
             // 배열을 훑으며 평균을 구합니다 (짝수: L, 홀수: R)
@@ -82,11 +87,11 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
             }
             baseL = sumL / (ADC_BUF_LEN / 2);
             baseR = sumR / (ADC_BUF_LEN / 2);
-            is_calibrated = 1; // 캘리브레이션 끝!
+            is_calibrated = 1; // 캘리브레이션
             return;
         }
 
-        // ② 배열 안에서 가장 큰 소리(Peak) 찾기
+        // 배열내 (Peak) 찾기
         uint32_t max_magL = 0;
         uint32_t max_magR = 0;
 
@@ -98,7 +103,10 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
             if(magR > max_magR) max_magR = magR;
         }
 
-        // ③ 찾아낸 최고 볼륨을 IIR 필터에 통과 (부드럽게 만들기)
+        // 터미널 출력을 위해 순수 최고 피크값을 저장
+                peakL = max_magL;
+                peakR = max_magR;
+        // 최고 볼륨 IIR 필터
         lvlL = lvlL + (uint32_t)(((int32_t)max_magL - (int32_t)lvlL) / (int32_t)ALPHA_DIV);
         lvlR = lvlR + (uint32_t)(((int32_t)max_magR - (int32_t)lvlR) / (int32_t)ALPHA_DIV);
     }
@@ -109,32 +117,41 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
  * ============================================================== */
 void app_loop(void)
 {
-    // 영점 조절이 안 끝났으면 모터 제어 대기
+    // 초기 조절값 전까지 제어x
     if (!is_calibrated) return;
 
-    // 🌟 핵심: 더 이상 여기서 ADC를 읽기 위해 기다리지 않습니다. (adc_readLR 삭제됨)
-    // 백그라운드 인터럽트에서 계산해 준 lvlL, lvlR 값을 그냥 날름 가져다 씁니다.
+
+    // 백그라운드 인터럽트에서 계산해 lvlL, lvlR 값 사용
 
     uint32_t diff = (lvlL > lvlR) ? (lvlL - lvlR) : (lvlR - lvlL);
 
     // 방향 판정
-    if (diff >= DIFF_TH)
-    {
+    if ((int32_t)(nowm - motor_lock_until_ms) >= 0)
+        {
+            // 조건 1: 한쪽이라도 SOUND_TH(절대 소리 기준) 이상 큰 소리가 났는가?
+            // 조건 2: 양쪽 차이가 DIFF_TH(방향 기준) 이상 나는가?
+            if ((lvlL >= SOUND_TH || lvlR >= SOUND_TH) && (diff >= DIFF_TH))
+            {
         char newDir = (lvlL > lvlR) ? 'L' : 'R';
         uint32_t now = HAL_GetTick();
 
         if (newDir != detectLR && (now - last_switch_ms >= SWITCH_HOLDOFF)) {
             detectLR = newDir;
             last_switch_ms = now;
-        }
-    }
-
+        	}
+          }
+       }
     // 디버그 출력
     static uint32_t last_dbg = 0;
     uint32_t nowm = HAL_GetTick();
     if (nowm - last_dbg >= 200) {
-        printf("lvlL=%u lvlR=%u diff=%u detect=%c\r\n",
-               (unsigned)lvlL, (unsigned)lvlR, (unsigned)diff, detectLR);
+    	printf("RawPk_L:%4lu RawPk_R:%4lu | Lvl_L:%4lu Lvl_R:%4lu | Diff:%4lu | Lock:%4ld ms | Dir:%c\r\n",
+    	               (unsigned long)peakL, (unsigned long)peakR,
+    	               (unsigned long)lvlL, (unsigned long)lvlR,
+    	               (unsigned long)diff,
+    	               // 남은 쿨다운 시간을 밀리초 단위로 보여줌
+    	               (int32_t)(motor_lock_until_ms - nowm) > 0 ? (int32_t)(motor_lock_until_ms - nowm) : 0,
+    	               detectLR);
         last_dbg = nowm;
     }
 
