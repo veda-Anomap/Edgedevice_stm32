@@ -1,163 +1,267 @@
 #include "app.h"
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
 extern ADC_HandleTypeDef hadc1;
 extern TIM_HandleTypeDef htim3;
 
-/* ==============================================================
- * 1. DMA 오디오 버퍼 및 설정
- * ============================================================== */
-#define ADC_BUF_LEN    200      // DMA가 한 번에 모을 데이터 개수 (L: 100개, R: 100개)
-uint16_t adc_buffer[ADC_BUF_LEN]; // 쏟아지는 마이크 값을 담을 빈 박스
+/* DMA buffer: interleaved [L, R, L, R, ...] */
+#define ADC_BUF_LEN 200U
+uint16_t adc_buffer[ADC_BUF_LEN];
 
-// 하드웨어 민감도 조절 변수 (터미널 값 보고 조절)
-#define SOUND_TH       400U     // [추가] 이 숫자보다 작은 소리 무시 (전체 볼륨 기준)
-#define DIFF_TH        220U     // 두 채널 레벨 차이 기준
-#define ALPHA_DIV      4U       // IIR 필터 부드러움 정도
-#define SWITCH_HOLDOFF 40U      // 방향 토글 방지(반사/노이즈) ms
+/* Direction detection gates */
+#define SOUND_TH       400U
+#define DIFF_TH        220U
+#define ALPHA_DIV      4U
+#define SWITCH_HOLDOFF 40U
 
-// 인터럽트(백그라운드)와 메인 루프가 같이 쓰는 변수는 반드시 volatile을 붙여야 합니다.
-static volatile uint32_t baseL = 0, baseR = 0;
-static volatile uint32_t lvlL = 0,  lvlR = 0;
-static volatile uint8_t is_calibrated = 0; // 영점 조절 완료 플래그
-static volatile uint32_t peakL = 0, peakR = 0;  // [추가] 디버그 확인용 순수 ADC 변화량(최대값)측정
+/* Sliding windows for SNR */
+#define SIG_WIN          6U
+#define NOISE_WIN       64U
+#define SNR_TH_Q8      384U /* 1.50x in Q8 */
+#define SNR_DIFF_TH_Q8  51U /* 0.20x in Q8 */
+#define NOISE_FREEZE_Q8 320U /* 1.25x in Q8 */
+
+/* Servo control */
+#define SERVO_LEFT_US    1200U
+#define SERVO_RIGHT_US   1820U
+#define SERVO_CENTER_US  1520U
+#define SERVO_RUN_MS      200U
+#define DIR_COOLDOWN_MS  1500U
+
+/* Shared state (ISR + main loop) */
+static volatile uint32_t baseL = 0U, baseR = 0U;
+static volatile uint32_t lvlL = 0U, lvlR = 0U;
+static volatile uint8_t is_calibrated = 0U;
+static volatile uint32_t peakL = 0U, peakR = 0U;
+static volatile uint32_t adcAvgL = 0U, adcAvgR = 0U;
+static volatile uint32_t noiseL = 1U, noiseR = 1U;
+static volatile uint32_t snrL_q8 = 0U, snrR_q8 = 0U;
+static volatile uint8_t noise_ready = 0U;
 
 static char detectLR = '-';
-static uint32_t last_switch_ms = 0;
-
-/* ==============================================================
- * 2. 모터 제어용 변수
- * ============================================================== */
-#define SERVO_LEFT_US   1200u
-#define SERVO_RIGHT_US  1820u
-#define SERVO_CENTER_US 1520u
-#define SERVO_RUN_MS    200u
-
-// 🛡️ [추가] 한 번 움직인 서보모터 추후 재감지까지의 최소시간 (1500 = 1.5초)
-#define DIR_COOLDOWN_MS 1500u
-
-static uint32_t motor_lock_until_ms = 0;
+static uint32_t last_switch_ms = 0U;
+static uint32_t motor_lock_until_ms = 0U;
 static char last_dir = '-';
-static uint8_t motor_running = 0;
-static uint32_t motor_stop_ms = 0;
+static uint8_t motor_running = 0U;
+static uint32_t motor_stop_ms = 0U;
 static char pending_dir = '-';
 
-/* ==============================================================
- * 3. 유틸리티 함수
- * ============================================================== */
+/* Window accumulators */
+static uint16_t sig_histL[SIG_WIN];
+static uint16_t sig_histR[SIG_WIN];
+static uint16_t noise_histL[NOISE_WIN];
+static uint16_t noise_histR[NOISE_WIN];
+static uint16_t sig_idx = 0U, sig_count = 0U;
+static uint16_t noise_idx = 0U, noise_count = 0U;
+static uint32_t sig_sumL = 0U, sig_sumR = 0U;
+static uint32_t noise_sumL = 0U, noise_sumR = 0U;
+
 static inline uint32_t u32_abs_diff(uint32_t a, uint32_t b)
 {
     return (a > b) ? (a - b) : (b - a);
 }
 
-/* ==============================================================
- * 4. 초기화 함수 (main.c에서 1회 호출됨)
- * ============================================================== */
+static inline uint32_t q8_ratio(uint32_t num, uint32_t den)
+{
+    if (den == 0U) den = 1U;
+    return (num << 8) / den;
+}
+
+static inline void ring_push_pair(uint16_t *histL,
+                                  uint16_t *histR,
+                                  uint16_t len,
+                                  uint16_t *idx,
+                                  uint16_t *count,
+                                  uint32_t *sumL,
+                                  uint32_t *sumR,
+                                  uint16_t vL,
+                                  uint16_t vR)
+{
+    if (*count == len) {
+        *sumL -= histL[*idx];
+        *sumR -= histR[*idx];
+    } else {
+        (*count)++;
+    }
+
+    histL[*idx] = vL;
+    histR[*idx] = vR;
+    *sumL += vL;
+    *sumR += vR;
+    *idx = (uint16_t)((*idx + 1U) % len);
+}
+
 void app_init(void)
 {
     detectLR = '-';
-    lvlL = lvlR = 0;
-    is_calibrated = 0; // 시작할 때 영점 조절 상태 초기화
+    last_dir = '-';
+    pending_dir = '-';
+    motor_running = 0U;
+    motor_lock_until_ms = 0U;
+    motor_stop_ms = 0U;
     last_switch_ms = HAL_GetTick();
 
-    // 모터 초기화
-    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, SERVO_CENTER_US);
+    baseL = baseR = 0U;
+    lvlL = lvlR = 0U;
+    peakL = peakR = 0U;
+    adcAvgL = adcAvgR = 0U;
+    noiseL = noiseR = 1U;
+    snrL_q8 = snrR_q8 = 0U;
+    noise_ready = 0U;
+    is_calibrated = 0U;
 
-    printf("Starting DMA Audio System...\r\n");
+    sig_idx = sig_count = 0U;
+    noise_idx = noise_count = 0U;
+    sig_sumL = sig_sumR = 0U;
+    noise_sumL = noise_sumR = 0U;
 
-    // 🌟 핵심: 여기서 딱 한 번만 명령하면, 이후엔 하드웨어가 무한 반복해서 배열을 채웁니다.
-    HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_buffer, ADC_BUF_LEN);
-}
-
-/* ==============================================================
- * 5. DMA 인터럽트 콜백 함수 (배열이 200개 꽉 찰 때마다 알아서 실행됨)
- * ============================================================== */
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc)
-{
-    if(hadc->Instance == ADC1) {
-
-        // 최초 1회 영점(Baseline) 캘리브레이션
-        if (!is_calibrated) {
-            uint32_t sumL = 0, sumR = 0;
-            // 배열을 훑으며 평균을 구합니다 (짝수: L, 홀수: R)
-            for(int i = 0; i < ADC_BUF_LEN; i += 2) {
-                sumL += adc_buffer[i];
-                sumR += adc_buffer[i+1];
-            }
-            baseL = sumL / (ADC_BUF_LEN / 2);
-            baseR = sumR / (ADC_BUF_LEN / 2);
-            is_calibrated = 1; // 캘리브레이션
-            return;
-        }
-
-        // 배열내 (Peak) 찾기
-        uint32_t max_magL = 0;
-        uint32_t max_magR = 0;
-
-        for(int i = 0; i < ADC_BUF_LEN; i += 2) {
-            uint32_t magL = u32_abs_diff(adc_buffer[i], baseL);
-            uint32_t magR = u32_abs_diff(adc_buffer[i+1], baseR);
-
-            if(magL > max_magL) max_magL = magL;
-            if(magR > max_magR) max_magR = magR;
-        }
-
-        // 터미널 출력을 위해 순수 최고 피크값을 저장
-                peakL = max_magL;
-                peakR = max_magR;
-        // 최고 볼륨 IIR 필터
-        lvlL = lvlL + (uint32_t)(((int32_t)max_magL - (int32_t)lvlL) / (int32_t)ALPHA_DIV);
-        lvlR = lvlR + (uint32_t)(((int32_t)max_magR - (int32_t)lvlR) / (int32_t)ALPHA_DIV);
+    for (uint32_t i = 0U; i < SIG_WIN; i++) {
+        sig_histL[i] = 0U;
+        sig_histR[i] = 0U;
     }
+    for (uint32_t i = 0U; i < NOISE_WIN; i++) {
+        noise_histL[i] = 0U;
+        noise_histR[i] = 0U;
+    }
+
+    __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, SERVO_CENTER_US);
+    printf("Starting DMA Audio System...\r\n");
+    HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buffer, ADC_BUF_LEN);
 }
 
-/* ==============================================================
- * 6. 메인 무한 루프
- * ============================================================== */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    if (hadc->Instance != ADC1) return;
+
+    const uint32_t samples_per_ch = ADC_BUF_LEN / 2U;
+
+    if (!is_calibrated) {
+        uint32_t sumL = 0U, sumR = 0U;
+        for (uint32_t i = 0U; i < ADC_BUF_LEN; i += 2U) {
+            sumL += adc_buffer[i];
+            sumR += adc_buffer[i + 1U];
+        }
+        baseL = sumL / samples_per_ch;
+        baseR = sumR / samples_per_ch;
+        is_calibrated = 1U;
+        return;
+    }
+
+    uint32_t max_magL = 0U, max_magR = 0U;
+    uint32_t sum_magL = 0U, sum_magR = 0U;
+    uint32_t sum_rawL = 0U, sum_rawR = 0U;
+
+    for (uint32_t i = 0U; i < ADC_BUF_LEN; i += 2U) {
+        const uint32_t rawL = adc_buffer[i];
+        const uint32_t rawR = adc_buffer[i + 1U];
+        const uint32_t magL = u32_abs_diff(rawL, baseL);
+        const uint32_t magR = u32_abs_diff(rawR, baseR);
+
+        sum_rawL += rawL;
+        sum_rawR += rawR;
+        sum_magL += magL;
+        sum_magR += magR;
+
+        if (magL > max_magL) max_magL = magL;
+        if (magR > max_magR) max_magR = magR;
+    }
+
+    const uint32_t frame_magL = sum_magL / samples_per_ch;
+    const uint32_t frame_magR = sum_magR / samples_per_ch;
+    adcAvgL = sum_rawL / samples_per_ch;
+    adcAvgR = sum_rawR / samples_per_ch;
+
+    ring_push_pair(sig_histL, sig_histR, SIG_WIN,
+                   &sig_idx, &sig_count, &sig_sumL, &sig_sumR,
+                   (uint16_t)frame_magL, (uint16_t)frame_magR);
+
+    const uint32_t sig_avgL = (sig_count > 0U) ? (sig_sumL / sig_count) : 0U;
+    const uint32_t sig_avgR = (sig_count > 0U) ? (sig_sumR / sig_count) : 0U;
+
+    uint8_t freeze_noise = 0U;
+    if (noise_count > 0U) {
+        const uint32_t cur_noiseL = noise_sumL / noise_count;
+        const uint32_t cur_noiseR = noise_sumR / noise_count;
+        const uint32_t frame_snrL_q8 = q8_ratio(frame_magL, cur_noiseL);
+        const uint32_t frame_snrR_q8 = q8_ratio(frame_magR, cur_noiseR);
+        if (frame_snrL_q8 >= NOISE_FREEZE_Q8 || frame_snrR_q8 >= NOISE_FREEZE_Q8) {
+            freeze_noise = 1U;
+        }
+    }
+
+    if (!freeze_noise || noise_count < (NOISE_WIN / 4U)) {
+        ring_push_pair(noise_histL, noise_histR, NOISE_WIN,
+                       &noise_idx, &noise_count, &noise_sumL, &noise_sumR,
+                       (uint16_t)frame_magL, (uint16_t)frame_magR);
+    }
+
+    noiseL = (noise_count > 0U) ? (noise_sumL / noise_count) : 1U;
+    noiseR = (noise_count > 0U) ? (noise_sumR / noise_count) : 1U;
+    noise_ready = (noise_count >= NOISE_WIN) ? 1U : 0U;
+    snrL_q8 = q8_ratio(sig_avgL, noiseL);
+    snrR_q8 = q8_ratio(sig_avgR, noiseR);
+
+    peakL = max_magL;
+    peakR = max_magR;
+    lvlL = lvlL + (uint32_t)(((int32_t)sig_avgL - (int32_t)lvlL) / (int32_t)ALPHA_DIV);
+    lvlR = lvlR + (uint32_t)(((int32_t)sig_avgR - (int32_t)lvlR) / (int32_t)ALPHA_DIV);
+}
+
 void app_loop(void)
 {
-    // 초기 조절값 전까지 제어x
     if (!is_calibrated) return;
 
+    const uint32_t sigL = lvlL;
+    const uint32_t sigR = lvlR;
+    const uint32_t nL = noiseL;
+    const uint32_t nR = noiseR;
+    const uint32_t sL = snrL_q8;
+    const uint32_t sR = snrR_q8;
+    const uint8_t nReady = noise_ready;
 
-    // 백그라운드 인터럽트에서 계산해 lvlL, lvlR 값 사용
+    const uint32_t diff = u32_abs_diff(sigL, sigR);
+    const uint32_t snr_diff = u32_abs_diff(sL, sR);
+    const uint32_t nowm = HAL_GetTick();
 
-    uint32_t diff = (lvlL > lvlR) ? (lvlL - lvlR) : (lvlR - lvlL);
+    if ((int32_t)(nowm - motor_lock_until_ms) >= 0) {
+        if (nReady &&
+            (sigL >= SOUND_TH || sigR >= SOUND_TH) &&
+            (diff >= DIFF_TH) &&
+            (sL >= SNR_TH_Q8 || sR >= SNR_TH_Q8) &&
+            (snr_diff >= SNR_DIFF_TH_Q8)) {
 
-    // 방향 판정
-    if ((int32_t)(nowm - motor_lock_until_ms) >= 0)
-        {
-            // 조건 1: 한쪽이라도 SOUND_TH(절대 소리 기준) 이상 큰 소리가 났는가?
-            // 조건 2: 양쪽 차이가 DIFF_TH(방향 기준) 이상 나는가?
-            if ((lvlL >= SOUND_TH || lvlR >= SOUND_TH) && (diff >= DIFF_TH))
-            {
-        char newDir = (lvlL > lvlR) ? 'L' : 'R';
-        uint32_t now = HAL_GetTick();
+            const char newDir = (sL > sR) ? 'L' : 'R';
+            const uint32_t now = HAL_GetTick();
 
-        if (newDir != detectLR && (now - last_switch_ms >= SWITCH_HOLDOFF)) {
-            detectLR = newDir;
-            last_switch_ms = now;
-        	}
-          }
-       }
-    // 디버그 출력
-    static uint32_t last_dbg = 0;
-    uint32_t nowm = HAL_GetTick();
-    if (nowm - last_dbg >= 200) {
-    	printf("RawPk_L:%4lu RawPk_R:%4lu | Lvl_L:%4lu Lvl_R:%4lu | Diff:%4lu | Lock:%4ld ms | Dir:%c\r\n",
-    	               (unsigned long)peakL, (unsigned long)peakR,
-    	               (unsigned long)lvlL, (unsigned long)lvlR,
-    	               (unsigned long)diff,
-    	               // 남은 쿨다운 시간을 밀리초 단위로 보여줌
-    	               (int32_t)(motor_lock_until_ms - nowm) > 0 ? (int32_t)(motor_lock_until_ms - nowm) : 0,
-    	               detectLR);
+            if (newDir != detectLR && (now - last_switch_ms >= SWITCH_HOLDOFF)) {
+                detectLR = newDir;
+                last_switch_ms = now;
+            }
+        }
+    }
+
+    static uint32_t last_dbg = 0U;
+    if (nowm - last_dbg >= 200U) {
+        /*
+         * ADCavg_L / ADCavg_R are raw ADC averages for left/right channels.
+         * Keep these fields in printf if you want both ADC channels in terminal.
+         */
+        printf("ADCavg_L:%4lu ADCavg_R:%4lu | RawPk_L:%4lu RawPk_R:%4lu | "
+               "Sig_L:%4lu Sig_R:%4lu | Noise_L:%4lu Noise_R:%4lu | "
+               "SNR_L:%2lu.%02lu SNR_R:%2lu.%02lu | Diff:%4lu | Lock:%4ld ms | Dir:%c\r\n",
+               (unsigned long)adcAvgL, (unsigned long)adcAvgR,
+               (unsigned long)peakL, (unsigned long)peakR,
+               (unsigned long)sigL, (unsigned long)sigR,
+               (unsigned long)nL, (unsigned long)nR,
+               (unsigned long)(sL / 256U), (unsigned long)(((sL % 256U) * 100U) / 256U),
+               (unsigned long)(sR / 256U), (unsigned long)(((sR % 256U) * 100U) / 256U),
+               (unsigned long)diff,
+               (int32_t)(motor_lock_until_ms - nowm) > 0 ? (int32_t)(motor_lock_until_ms - nowm) : 0,
+               detectLR);
         last_dbg = nowm;
     }
 
-    /* ==================================
-       방향 변화 감지 및 모터 구동 (기존 로직 동일)
-       ================================== */
     if (detectLR != last_dir) {
         last_dir = detectLR;
 
@@ -170,7 +274,7 @@ void app_loop(void)
                 pending_dir = detectLR;
             } else {
                 pending_dir = '-';
-                motor_running = 1;
+                motor_running = 1U;
                 motor_stop_ms = nowm + SERVO_RUN_MS;
 
                 HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
@@ -183,20 +287,20 @@ void app_loop(void)
     }
 
     if (motor_running && (int32_t)(nowm - motor_stop_ms) >= 0) {
-        motor_running = 0;
+        motor_running = 0U;
         HAL_TIM_PWM_Stop(&htim3, TIM_CHANNEL_1);
 
         if (pending_dir == 'L' || pending_dir == 'R') {
-            char dir = pending_dir;
+            const char dir = pending_dir;
             pending_dir = '-';
 
-            motor_running = 1;
-            motor_stop_ms = nowm + 20 + SERVO_RUN_MS;
+            motor_running = 1U;
+            motor_stop_ms = nowm + 20U + SERVO_RUN_MS;
 
             HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
             __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1,
                                   (dir == 'L') ? SERVO_LEFT_US : SERVO_RIGHT_US);
-            motor_lock_until_ms = nowm + 20 + SERVO_RUN_MS + DIR_COOLDOWN_MS;
+            motor_lock_until_ms = nowm + 20U + SERVO_RUN_MS + DIR_COOLDOWN_MS;
         }
     }
 }
