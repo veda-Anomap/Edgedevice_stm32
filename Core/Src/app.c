@@ -5,6 +5,30 @@
 extern ADC_HandleTypeDef hadc1;
 extern TIM_HandleTypeDef htim3;
 
+
+
+/* ==============================================================
+ * 1. DMA 오디오 버퍼 및 설정
+ * ============================================================== */
+#define ADC_BUF_LEN    200      // DMA가 한 번에 모을 데이터 개수 (L: 100개, R: 100개)
+uint16_t adc_buffer[ADC_BUF_LEN]; // 쏟아지는 마이크 값을 담을 빈 박스
+
+#define DIFF_TH        220U     // 두 채널 레벨 차이 기준
+#define ALPHA_DIV      4U       // IIR 필터 부드러움 정도
+#define SWITCH_HOLDOFF 40U      // 방향 토글 방지(반사/노이즈) ms
+
+// 인터럽트(백그라운드)와 메인 루프랑 같이 변수를 쓰기 때문에 volatile 적용
+static volatile uint32_t baseL = 0, baseR = 0;
+static volatile uint32_t lvlL = 0,  lvlR = 0;
+static volatile uint8_t is_calibrated = 0; // 영점 조절 완료 플래그
+
+static char detectLR = '-';
+static uint32_t last_switch_ms = 0;
+
+
+
+
+
 static uint32_t next_ms = 0;
 static uint8_t state = 0;
 static volatile uint32_t rawL = 0, rawR = 0;  // 마지막 원본 ADC 값 보관

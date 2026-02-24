@@ -116,7 +116,7 @@ int main(void)
   const char *msg = "BOOT\r\n";
   HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2, GPIO_PIN_RESET);
-  HAL_ADC_Start(&hadc1);
+  // HAL_ADC_Start(&hadc1); 기존 단발성으로 adc값을 읽었던 방식을 DMA로 변경해서 제거
 //  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   app_init();
 
