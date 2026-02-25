@@ -62,23 +62,14 @@ void app_loop(void)
         const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
         const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
-        printf("ADCavg_L:%4lu ADCavg_R:%4lu | RawPk_L:%4lu RawPk_R:%4lu | "
-               "Sig_L:%4lu Sig_R:%4lu | Noise_L:%4lu Noise_R:%4lu | "
-               "SNR_L:%2lu.%02lu SNR_R:%2lu.%02lu | Diff:%4lu | Gate[S:%u N:%u R:%u] | "
-               "TH[V:%u B:%u E:%lu] T:%c%ld.%02ldC H:%lu.%02lu%% | Lock:%4ld ms | Dir:%c\r\n",
+        /* 요청 포맷: ADC 좌/우, 최종 판정 신호 좌/우, 방향, 온습도만 출력 */
+        printf("ADC_L:%4lu ADC_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
+               "T:%c%ld.%02ldC H:%lu.%02lu%%\r\n",
                (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
-               (unsigned long)dbg.peak_l, (unsigned long)dbg.peak_r,
                (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
-               (unsigned long)dbg.noise_l, (unsigned long)dbg.noise_r,
-               (unsigned long)(dbg.snr_l_q8 / 256U), (unsigned long)(((dbg.snr_l_q8 % 256U) * 100U) / 256U),
-               (unsigned long)(dbg.snr_r_q8 / 256U), (unsigned long)(((dbg.snr_r_q8 % 256U) * 100U) / 256U),
-               (unsigned long)dbg.diff,
-               (unsigned int)dbg.gate_sound, (unsigned int)dbg.gate_snr, (unsigned int)dbg.gate_ratio,
-               (unsigned int)th.valid, (unsigned int)th.busy, (unsigned long)th.error_count,
+               detect_dir,
                temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
-               (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
-               (int32_t)(lock_until_ms - nowm) > 0 ? (int32_t)(lock_until_ms - nowm) : 0,
-               detect_dir);
+               (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U));
         last_dbg = nowm;
     }
 
