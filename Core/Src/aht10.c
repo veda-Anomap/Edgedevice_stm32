@@ -2,7 +2,7 @@
 
 /* AHT10/AHT20 I2C 주소 (7-bit 0x38, HAL에서는 1비트 좌시프트 주소 사용) */
 #define AHT10_ADDR            (0x38U << 1)
-
+//
 /* 명령어 */
 #define AHT10_CMD_INIT_0      0xE1U
 #define AHT10_CMD_INIT_1      0x08U
