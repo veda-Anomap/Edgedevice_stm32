@@ -77,9 +77,16 @@ void motor_ctrl_enter_manual(void)
 
 void motor_ctrl_enter_auto(void)
 {
+    /* Auto mode re-entry: reset servo pose to center */
     pending_dir = '-';
     motor_running = 0U;
     motor_lock_until_ms = 0U;
+    last_dir = '-';
+
+    current_pan_pwm = PAN_CENTER;
+    current_tilt_pwm = TILT_CENTER;
+    write_pan(current_pan_pwm);
+    write_tilt(current_tilt_pwm);
 }
 
 void manual_move_pan(int step)
