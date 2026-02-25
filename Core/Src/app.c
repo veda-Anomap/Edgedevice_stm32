@@ -44,7 +44,7 @@ static void handle_uart_command(uint8_t cmd)
             manual_move_tilt(+50);
             return;
         }
-        if (cmd == 'A') {
+        if (cmd == 'A' || cmd == 'a') {
             manual_move_pan(-50);
             return;
         }
@@ -98,10 +98,9 @@ void app_loop(void)
     }
 
     static uint32_t last_dbg = 0U;
-    if (nowm - last_dbg >= 200U) {
+    if (current_mode == MODE_AUTO && (nowm - last_dbg >= 200U)) {
         mic_debug_t dbg = {0};
         aht10_data_t th;
-        const char dir_out = (current_mode == MODE_MANUAL) ? 'M' : detect_dir;
 
         if (mic_is_calibrated()) {
             mic_get_debug(&dbg);
@@ -115,7 +114,7 @@ void app_loop(void)
                "T:%c%ld.%02ldC H:%lu.%02lu%%\r\n",
                (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
-               dir_out,
+               detect_dir,
                temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
                (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U));
         last_dbg = nowm;
