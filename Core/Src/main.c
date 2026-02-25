@@ -33,6 +33,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* PB0/PB1/PB2 LED aliases */
+#define LED_PORT GPIOB
+#define LED1_PIN GPIO_PIN_0
+#define LED2_PIN GPIO_PIN_1
+#define LED3_PIN GPIO_PIN_2
+#define LED_ALL_PINS (LED1_PIN | LED2_PIN | LED3_PIN)
 
 /* USER CODE END PD */
 
@@ -69,6 +75,17 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* If your LED board is active-low, swap SET/RESET in these helpers. */
+static inline void LED_All_On(void)
+{
+  HAL_GPIO_WritePin(LED_PORT, LED_ALL_PINS, GPIO_PIN_SET);
+}
+
+static inline void LED_All_Off(void)
+{
+  HAL_GPIO_WritePin(LED_PORT, LED_ALL_PINS, GPIO_PIN_RESET);
+}
+
 int _write(int file, char *ptr, int len)
 {
     HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, 100);
@@ -115,7 +132,8 @@ int main(void)
   //HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
   const char *msg = "BOOT\r\n";
   HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2, GPIO_PIN_RESET);
+  LED_All_On();   // PB0, PB1, PB2 ON
+  //LED_All_Off(); // PB0, PB1, PB2 OFF
   // HAL_ADC_Start(&hadc1); 기존 단발성으로 adc값을 읽었던 방식을 DMA로 변경해서 제거
 //  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   app_init();
