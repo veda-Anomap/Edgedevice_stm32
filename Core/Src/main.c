@@ -132,9 +132,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   static uint32_t max_adc = 0;
   static uint32_t last_print = 0;
-//  ServoCal_Run();
-//dfff
-  ServoCal_Run();
+  // ServoCal_Run(); // 임시 서보 확인용: 기본 동작에서는 비활성화
   while (1)
   {
     /* USER CODE END WHILE */

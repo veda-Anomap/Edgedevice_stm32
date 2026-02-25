@@ -16,38 +16,21 @@ typedef enum {
 
 static volatile SystemMode_t current_mode = MODE_AUTO;
 static uint8_t rx_data = 0U;
-static uint8_t mode_cmd_prefix = 0U; /* 'a' or 'm' when waiting second char */
 
 static void handle_uart_command(uint8_t cmd)
 {
-    /* 2-char mode commands:
-     * - "at" -> auto mode
-     * - "ma" -> manual mode
+    /* Mode command:
+     * - 'o' (on): auto mode
+     * - 'f' (off): manual mode
      */
-    if (mode_cmd_prefix == 'a') {
-        mode_cmd_prefix = 0U;
-        if (cmd == 't' || cmd == 'T') {
-            current_mode = MODE_AUTO;
-            motor_ctrl_enter_auto();
-            return;
-        }
-        /* fallthrough: current char is handled normally */
-    } else if (mode_cmd_prefix == 'm') {
-        mode_cmd_prefix = 0U;
-        if (cmd == 'a' || cmd == 'A') {
-            current_mode = MODE_MANUAL;
-            motor_ctrl_enter_manual();
-            return;
-        }
-        /* fallthrough: current char is handled normally */
-    }
-
-    if (cmd == 'a') {
-        mode_cmd_prefix = 'a';
+    if (cmd == 'o' || cmd == 'O') {
+        current_mode = MODE_AUTO;
+        motor_ctrl_enter_auto();
         return;
     }
-    if (cmd == 'm') {
-        mode_cmd_prefix = 'm';
+    if (cmd == 'f' || cmd == 'F') {
+        current_mode = MODE_MANUAL;
+        motor_ctrl_enter_manual();
         return;
     }
 
