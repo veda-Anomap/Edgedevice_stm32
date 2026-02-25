@@ -1,27 +1,47 @@
 #include "motor_ctrl.h"
 
-/* 서보 구동 타이밍 */
-#define SERVO_LEFT_US    1200U /* 좌회전 명령 PWM 펄스폭 */
-#define SERVO_RIGHT_US   1820U /* 우회전 명령 PWM 펄스폭 */
-#define SERVO_CENTER_US  1520U /* 중앙 PWM 펄스폭 */
-#define SERVO_RUN_MS      200U /* 명령당 서보 구동 시간(ms) */
-#define DIR_COOLDOWN_MS  1500U /* 명령 후 재트리거 방지 락(ms) */
+/* Auto tracking behavior */
+#define SERVO_RUN_MS      200U
+#define DIR_COOLDOWN_MS  1500U
 
 static TIM_HandleTypeDef *s_htim = NULL;
 
-/* 방향/서보 상태머신 */
-static uint32_t motor_lock_until_ms = 0U; /* 이 시각 전에는 신규 명령 무시 */
-static char last_dir = '-';               /* 이미 소비된 마지막 방향 */
-static uint8_t motor_running = 0U;        /* 서보 명령 실행 중 여부 */
-static uint32_t motor_stop_ms = 0U;       /* 현재 명령 종료 시각 */
-static char pending_dir = '-';            /* 서보 바쁠 때 대기시킬 방향 */
+/* Shared servo state */
+static uint16_t current_pan_pwm = PAN_CENTER;
+static uint16_t current_tilt_pwm = TILT_CENTER;
 
-static inline void motor_start_dir(char dir)
+/* Auto state machine */
+static uint32_t motor_lock_until_ms = 0U;
+static char last_dir = '-';
+static uint8_t motor_running = 0U;
+static uint32_t motor_stop_ms = 0U;
+static char pending_dir = '-';
+
+static uint16_t clamp_u16(int32_t v, uint16_t min_v, uint16_t max_v)
+{
+    if (v < (int32_t)min_v) return min_v;
+    if (v > (int32_t)max_v) return max_v;
+    return (uint16_t)v;
+}
+
+static inline void write_pan(uint16_t pwm_us)
 {
     if (s_htim == NULL) return;
     HAL_TIM_PWM_Start(s_htim, TIM_CHANNEL_1);
-    __HAL_TIM_SET_COMPARE(s_htim, TIM_CHANNEL_1,
-                          (dir == 'L') ? SERVO_LEFT_US : SERVO_RIGHT_US);
+    __HAL_TIM_SET_COMPARE(s_htim, TIM_CHANNEL_1, pwm_us);
+}
+
+static inline void write_tilt(uint16_t pwm_us)
+{
+    if (s_htim == NULL) return;
+    HAL_TIM_PWM_Start(s_htim, TIM_CHANNEL_2);
+    __HAL_TIM_SET_COMPARE(s_htim, TIM_CHANNEL_2, pwm_us);
+}
+
+static inline void motor_start_dir(char dir)
+{
+    current_pan_pwm = (dir == 'L') ? PAN_LEFT : PAN_RIGHT;
+    write_pan(current_pan_pwm);
 }
 
 void motor_ctrl_init(TIM_HandleTypeDef *htim)
@@ -34,9 +54,11 @@ void motor_ctrl_init(TIM_HandleTypeDef *htim)
     motor_lock_until_ms = 0U;
     motor_stop_ms = 0U;
 
-    if (s_htim != NULL) {
-        __HAL_TIM_SET_COMPARE(s_htim, TIM_CHANNEL_1, SERVO_CENTER_US);
-    }
+    current_pan_pwm = PAN_CENTER;
+    current_tilt_pwm = TILT_CENTER;
+
+    write_pan(current_pan_pwm);
+    write_tilt(current_tilt_pwm);
 }
 
 uint32_t motor_ctrl_get_lock_until_ms(void)
@@ -44,9 +66,48 @@ uint32_t motor_ctrl_get_lock_until_ms(void)
     return motor_lock_until_ms;
 }
 
+void motor_ctrl_enter_manual(void)
+{
+    pending_dir = '-';
+    motor_running = 0U;
+    motor_lock_until_ms = 0U;
+    write_pan(current_pan_pwm);
+    write_tilt(current_tilt_pwm);
+}
+
+void motor_ctrl_enter_auto(void)
+{
+    pending_dir = '-';
+    motor_running = 0U;
+    motor_lock_until_ms = 0U;
+}
+
+void manual_move_pan(int step)
+{
+    const int32_t next = (int32_t)current_pan_pwm + (int32_t)step;
+    current_pan_pwm = clamp_u16(next, PAN_LEFT, PAN_RIGHT);
+    write_pan(current_pan_pwm);
+}
+
+void manual_move_tilt(int step)
+{
+    const int32_t next = (int32_t)current_tilt_pwm + (int32_t)step;
+    current_tilt_pwm = clamp_u16(next, TILT_UP, TILT_DOWN);
+    write_tilt(current_tilt_pwm);
+}
+
+uint16_t motor_ctrl_get_pan_pwm(void)
+{
+    return current_pan_pwm;
+}
+
+uint16_t motor_ctrl_get_tilt_pwm(void)
+{
+    return current_tilt_pwm;
+}
+
 void motor_ctrl_process(uint32_t now_ms, char detect_dir)
 {
-    /* 방향 변화 감지 시 서보 명령 스케줄링 */
     if (detect_dir != last_dir) {
         last_dir = detect_dir;
 
@@ -56,7 +117,6 @@ void motor_ctrl_process(uint32_t now_ms, char detect_dir)
             }
 
             if (motor_running) {
-                /* 서보가 바쁘면 최신 방향만 대기열로 유지 */
                 pending_dir = detect_dir;
             } else {
                 pending_dir = '-';
@@ -69,7 +129,6 @@ void motor_ctrl_process(uint32_t now_ms, char detect_dir)
         }
     }
 
-    /* 현재 명령 종료 후 필요 시 pending 명령 1회 실행 */
     if (motor_running && (int32_t)(now_ms - motor_stop_ms) >= 0) {
         motor_running = 0U;
         if (s_htim != NULL) {
