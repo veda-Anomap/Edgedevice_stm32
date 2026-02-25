@@ -16,13 +16,38 @@ typedef enum {
 
 static volatile SystemMode_t current_mode = MODE_AUTO;
 static uint8_t rx_data = 0U;
+static uint8_t mode_cmd_prefix = 0U; /* 'a' or 'm' when waiting second char */
 
 static void handle_uart_command(uint8_t cmd)
 {
-    /* Always allow manual mode entry */
-    if (cmd == 'M' || cmd == 'm') {
-        current_mode = MODE_MANUAL;
-        motor_ctrl_enter_manual();
+    /* 2-char mode commands:
+     * - "at" -> auto mode
+     * - "ma" -> manual mode
+     */
+    if (mode_cmd_prefix == 'a') {
+        mode_cmd_prefix = 0U;
+        if (cmd == 't' || cmd == 'T') {
+            current_mode = MODE_AUTO;
+            motor_ctrl_enter_auto();
+            return;
+        }
+        /* fallthrough: current char is handled normally */
+    } else if (mode_cmd_prefix == 'm') {
+        mode_cmd_prefix = 0U;
+        if (cmd == 'a' || cmd == 'A') {
+            current_mode = MODE_MANUAL;
+            motor_ctrl_enter_manual();
+            return;
+        }
+        /* fallthrough: current char is handled normally */
+    }
+
+    if (cmd == 'a') {
+        mode_cmd_prefix = 'a';
+        return;
+    }
+    if (cmd == 'm') {
+        mode_cmd_prefix = 'm';
         return;
     }
 
@@ -44,23 +69,6 @@ static void handle_uart_command(uint8_t cmd)
             manual_move_pan(+50);
             return;
         }
-
-        /*
-         * Note:
-         * - 'A' is reserved for manual pan-left.
-         * - Use lowercase 'a' to switch back to AUTO while in manual mode.
-         */
-        if (cmd == 'a') {
-            current_mode = MODE_AUTO;
-            motor_ctrl_enter_auto();
-            return;
-        }
-    }
-
-    /* AUTO mode selection when not using manual movement keys */
-    if (cmd == 'A' || cmd == 'a') {
-        current_mode = MODE_AUTO;
-        motor_ctrl_enter_auto();
     }
 }
 
