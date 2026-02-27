@@ -63,7 +63,7 @@ static void aht10_filter_push(int32_t temp_c_x100, uint32_t humi_rh_x100)
     s_temp_c_x100 = (int32_t)(s_temp_sum / s_hist_count);
     s_humi_rh_x100 = (uint32_t)(s_humi_sum / s_hist_count);
 }
-
+//
 static void aht10_send_init_once(void)
 {
     uint8_t cmd[3] = { AHT10_CMD_INIT_0, AHT10_CMD_INIT_1, AHT10_CMD_INIT_2 };
