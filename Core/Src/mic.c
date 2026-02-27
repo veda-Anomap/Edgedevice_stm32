@@ -12,9 +12,9 @@ static uint16_t adc_buffer[ADC_BUF_LEN];
 /* 슬라이딩 윈도우 / SNR 게이트 */
 #define SIG_WIN          6U   /* 최근 신호 추적용 짧은 창 */
 #define NOISE_WIN       64U   /* 주변 소음 추적용 긴 창 */
-#define SNR_TH_Q8      384U   /* 절대 SNR 임계값: 1.50배(Q8) */
+#define SNR_TH_Q8      300U   /* 절대 SNR 임계값: 1.50배(Q8) */
 #define NOISE_FREEZE_Q8 320U  /* 프레임 SNR이 1.25배 이상이면 노이즈 업데이트 중지 */
-#define DIR_RATIO_TH_Q8 333U  /* 승자/패자 SNR 비율 최소 1.30배(Q8) */
+#define DIR_RATIO_TH_Q8 350U  /* 승자/패자 SNR 비율 최소 1.30배(Q8) */
 
 /*
  * DMA ISR와 메인 루프가 공유하는 상태값.

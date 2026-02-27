@@ -15,6 +15,7 @@
 #define AHT10_CONV_TIME_MS    80U
 #define AHT10_PERIOD_DEFAULT  2000U
 #define AHT10_PERIOD_MIN_MS   1000U
+#define AHT10_FILTER_WIN      10U
 #define AHT10_FULL_SCALE_20B  1048576ULL
 
 typedef enum {
@@ -34,6 +35,34 @@ static uint32_t s_last_update_ms = 0U;
 static uint32_t s_error_count = 0U;
 static uint8_t s_valid = 0U;
 static uint8_t s_busy = 0U;
+
+/* N=10 FIFO(원형버퍼) 이동평균 */
+static int32_t s_temp_hist[AHT10_FILTER_WIN];
+static uint32_t s_humi_hist[AHT10_FILTER_WIN];
+static uint8_t s_hist_idx = 0U;
+static uint8_t s_hist_count = 0U;
+static int64_t s_temp_sum = 0;
+static uint64_t s_humi_sum = 0ULL;
+
+static void aht10_filter_push(int32_t temp_c_x100, uint32_t humi_rh_x100)
+{
+    if (s_hist_count == AHT10_FILTER_WIN) {
+        s_temp_sum -= s_temp_hist[s_hist_idx];
+        s_humi_sum -= s_humi_hist[s_hist_idx];
+    } else {
+        s_hist_count++;
+    }
+
+    s_temp_hist[s_hist_idx] = temp_c_x100;
+    s_humi_hist[s_hist_idx] = humi_rh_x100;
+    s_temp_sum += temp_c_x100;
+    s_humi_sum += humi_rh_x100;
+
+    s_hist_idx = (uint8_t)((s_hist_idx + 1U) % AHT10_FILTER_WIN);
+
+    s_temp_c_x100 = (int32_t)(s_temp_sum / s_hist_count);
+    s_humi_rh_x100 = (uint32_t)(s_humi_sum / s_hist_count);
+}
 
 static void aht10_send_init_once(void)
 {
@@ -62,6 +91,15 @@ void aht10_init(I2C_HandleTypeDef *hi2c, uint32_t period_ms)
     s_error_count = 0U;
     s_valid = 0U;
     s_busy = 0U;
+    s_hist_idx = 0U;
+    s_hist_count = 0U;
+    s_temp_sum = 0;
+    s_humi_sum = 0ULL;
+
+    for (uint32_t i = 0U; i < AHT10_FILTER_WIN; i++) {
+        s_temp_hist[i] = 0;
+        s_humi_hist[i] = 0U;
+    }
 
     if (s_hi2c != NULL) {
         aht10_send_init_once();
@@ -110,10 +148,13 @@ void aht10_process(uint32_t now_ms)
     uint32_t raw_t = (((uint32_t)rx[3] & 0x0FU) << 16) | ((uint32_t)rx[4] << 8) | (uint32_t)rx[5];
 
     /* 습도[%RH*100] = raw_h * 10000 / 2^20 */
-    s_humi_rh_x100 = (uint32_t)(((uint64_t)raw_h * 10000ULL) / AHT10_FULL_SCALE_20B);
+    const uint32_t humi_raw_x100 = (uint32_t)(((uint64_t)raw_h * 10000ULL) / AHT10_FULL_SCALE_20B);
 
     /* 온도[C*100] = (raw_t * 20000 / 2^20) - 5000 */
-    s_temp_c_x100 = (int32_t)(((uint64_t)raw_t * 20000ULL) / AHT10_FULL_SCALE_20B) - 5000;
+    const int32_t temp_raw_x100 = (int32_t)(((uint64_t)raw_t * 20000ULL) / AHT10_FULL_SCALE_20B) - 5000;
+
+    /* 단일 샘플이 아니라 최근 N=10 평균값을 최종 출력값으로 사용 */
+    aht10_filter_push(temp_raw_x100, humi_raw_x100);
 
     s_valid = 1U;
     s_busy = 0U;
