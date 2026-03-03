@@ -5,7 +5,7 @@
 static uint16_t adc_buffer[ADC_BUF_LEN];
 
 /* 방향 판단 전 기본 게이트 */
-#define SOUND_TH       400U /* 유효 소리로 볼 최소 신호 크기 */
+#define SOUND_TH       390U /* 유효 소리로 볼 최소 신호 크기 */
 #define ALPHA_DIV      4U   /* IIR 평활 계수: 클수록 더 부드럽고 느림 */
 #define SWITCH_HOLDOFF 80U  /* 방향 토글 최소 간격(ms) */
 
