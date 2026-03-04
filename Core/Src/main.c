@@ -638,7 +638,8 @@ void StartControlTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    app_loop();
+    osDelay(5);
   }
   /* USER CODE END StartControlTask */
 }
