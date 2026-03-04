@@ -17,6 +17,15 @@ typedef enum {
 static volatile SystemMode_t current_mode = MODE_AUTO;
 static uint8_t rx_data = 0U;
 
+/* PWM 범위를 0~180도 각도로 선형 변환 */
+static int32_t pwm_to_deg(uint16_t pwm, uint16_t min_pwm, uint16_t max_pwm)
+{
+    if (max_pwm <= min_pwm) return 0;
+    if (pwm < min_pwm) pwm = min_pwm;
+    if (pwm > max_pwm) pwm = max_pwm;
+    return ((int32_t)(pwm - min_pwm) * 180) / (int32_t)(max_pwm - min_pwm);
+}
+
 static void handle_uart_command(uint8_t cmd)
 {
     /* Mode command:
@@ -86,6 +95,10 @@ void app_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
     char detect_dir = '-';
+    const uint16_t pan_pwm = motor_ctrl_get_pan_pwm();
+    const uint16_t tilt_pwm = motor_ctrl_get_tilt_pwm();
+    const int32_t pan_deg = pwm_to_deg(pan_pwm, PAN_LEFT, PAN_RIGHT);
+    const int32_t tilt_deg = pwm_to_deg(tilt_pwm, TILT_UP, TILT_DOWN);
 
     aht10_process(nowm);
 
@@ -98,25 +111,31 @@ void app_loop(void)
     }
 
     static uint32_t last_dbg = 0U;
-    if (current_mode == MODE_AUTO && (nowm - last_dbg >= 200U)) {
-        mic_debug_t dbg = {0};
-        aht10_data_t th;
+    if (nowm - last_dbg >= 200U) {
+        if (current_mode == MODE_AUTO) {
+            mic_debug_t dbg = {0};
+            aht10_data_t th;
 
-        if (mic_is_calibrated()) {
-            mic_get_debug(&dbg);
+            if (mic_is_calibrated()) {
+                mic_get_debug(&dbg);
+            }
+            aht10_get_data(&th);
+
+            const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
+            const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
+
+            printf("ADC_L:%4lu ADC_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
+                   "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%%\r\n",
+                   (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
+                   (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
+                   detect_dir,
+                   (long)pan_deg, (long)tilt_deg,
+                   temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
+                   (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U));
+        } else {
+            printf("MODE:MANUAL | PAN:%3lddeg TILT:%3lddeg | PAN_PWM:%u TILT_PWM:%u\r\n",
+                   (long)pan_deg, (long)tilt_deg, pan_pwm, tilt_pwm);
         }
-        aht10_get_data(&th);
-
-        const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
-        const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
-
-        printf("ADC_L:%4lu ADC_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
-               "T:%c%ld.%02ldC H:%lu.%02lu%%\r\n",
-               (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
-               (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
-               detect_dir,
-               temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
-               (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U));
         last_dbg = nowm;
     }
 }
