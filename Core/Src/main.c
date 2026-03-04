@@ -243,7 +243,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-	  app_loop();
+	  //app_loop(); //RTOS사용시 미실행
 
 	    }
   /* USER CODE END 3 */
