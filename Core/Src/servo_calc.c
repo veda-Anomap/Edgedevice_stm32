@@ -1,5 +1,6 @@
 #include "main.h"
 #include <stdio.h>
+#include "cmsis_os2.h"
 
 extern TIM_HandleTypeDef htim3;
 extern UART_HandleTypeDef huart2;
@@ -15,6 +16,16 @@ static void servo_set_us(uint16_t us)
 {
     HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, us);
+}
+
+/* RTOS 동작 중에는 osDelay 사용, 커널 시작 전에는 HAL_Delay 사용 */
+static void delay_ms(uint32_t ms)
+{
+    if (osKernelGetState() == osKernelRunning) {
+        (void)osDelay(ms);
+    } else {
+        HAL_Delay(ms);
+    }
 }
 
 /**
@@ -35,7 +46,7 @@ void ServoCal_Run(void)
     {
         servo_set_us(us);
         printf("TEST us=%u\r\n", us);
-        HAL_Delay(hold_ms);
+        delay_ms(hold_ms);
     }
 
     // 끝나면 1500으로 돌려놓기(원하면 제거 가능)
