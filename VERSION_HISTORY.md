@@ -5,6 +5,81 @@
 
 ---
 
+## [v0.9.5] - 2026-03-05
+### v0.9.4 상세 보강 기록 (Dead Code 정리 + TIM11 Timebase 분리)
+- 이 항목은 v0.9.4의 구현 의도/동작 원리를 더 자세히 남긴 보강 이력입니다.
+
+### A) Dead Code 정리 상세 (`Core/Src/main.c`)
+- 변경 전:
+  - `osKernelStart()` 아래 `while (1)` 내부에 과거 베어메탈 흔적(`app_loop()` 주석, 미사용 지역 변수)이 남아 있었음.
+  - RTOS 구조에서 해당 구간은 실제로 실행되지 않는데 코드가 남아 있어 오해 가능성이 높았음.
+- 변경 후:
+  - `while (1)` 블록 내부를 최소 형태로 정리.
+  - 미사용 변수/과거 호출 흔적 제거.
+  - 주석을 `RTOS: should not reach here`로 명확히 표기.
+- 기술적 효과:
+  - 기능 변화는 없음(실행 경로 동일).
+  - 유지보수 시 "왜 여기 app_loop가 없지?" 같은 혼란 감소.
+
+### B) HAL Timebase TIM11 분리 상세
+- 목적:
+  - FreeRTOS 스케줄링 tick(SysTick)과 HAL tick(HAL_GetTick/HAL_Delay 기반)을 분리하여 시간축 간섭 리스크를 낮춤.
+
+#### 1) 신규 파일 추가
+- 파일: `Core/Src/stm32f4xx_hal_timebase_tim.c`
+- 핵심 구현:
+  - `HAL_InitTick(uint32_t TickPriority)`
+    - APB2 클럭 기반으로 TIM11 prescaler 계산.
+    - TIM11을 1MHz 카운터/1ms 주기로 설정.
+    - TIM11 update interrupt 시작.
+  - `HAL_SuspendTick()` / `HAL_ResumeTick()`
+    - TIM11 update IT on/off 제어.
+  - `HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)`
+    - `htim->Instance == TIM11`일 때만 `HAL_IncTick()` 호출.
+
+#### 2) 인터럽트 연결
+- 파일: `Core/Src/stm32f4xx_it.c`, `Core/Inc/stm32f4xx_it.h`
+- 변경:
+  - `TIM1_TRG_COM_TIM11_IRQHandler()` 추가.
+  - 핸들러에서 `HAL_TIM_IRQHandler(&htim11)` 호출.
+  - `SysTick_Handler()`에서 `HAL_IncTick()` 제거하고 RTOS tick 처리(`xPortSysTickHandler`)만 유지.
+
+#### 3) MSP(HAL 하위 초기화) 연결
+- 파일: `Core/Src/stm32f4xx_hal_msp.c`
+- 변경:
+  - `HAL_TIM_Base_MspInit()`에 `TIM11` 분기 추가:
+    - `__HAL_RCC_TIM11_CLK_ENABLE()`
+    - `HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, TICK_INT_PRIORITY, 0)`
+    - `HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn)`
+  - `HAL_TIM_Base_MspDeInit()`에 `TIM11` 분기 추가:
+    - clock disable + IRQ disable
+
+#### 4) IOC 반영
+- 파일: `irrled.ioc`
+- 반영값:
+  - `TIM11` IP 추가
+  - `VP_TIM11_VS_ClockSourceINT` 추가
+  - `TIM1_TRG_COM_TIM11_IRQn` 항목 추가
+  - TIM11 기본 주기/분주 파라미터 반영
+
+### C) 변경 후 시간축 동작 요약
+- SysTick:
+  - FreeRTOS 스케줄러 tick 전용.
+- TIM11 update interrupt:
+  - HAL tick 증가 전용(`HAL_IncTick()`).
+- 결과:
+  - RTOS scheduling과 HAL timebase가 분리되어 구조적으로 더 명확해짐.
+
+### D) 주의/운영 포인트
+- CubeMX 코드 재생성 시:
+  - `stm32f4xx_hal_timebase_tim.c` 유지 여부
+  - TIM11 IRQ/ MSP 분기 유지 여부
+  - SysTick 핸들러 내용(의도치 않은 `HAL_IncTick()` 재삽입) 확인 필요.
+- 로컬 빌드:
+  - 현재 작업 환경에 `make`가 없어 빌드 실행은 미수행.
+
+---
+
 ## [v0.9.4] - 2026-03-05
 ### Dead Code 정리(main.c)
 - 대상 파일: `Core/Src/main.c`
