@@ -255,9 +255,9 @@ static char parse_motor_command(const uint8_t *payload, uint32_t len, char *cmd_
 
     (void)snprintf(cmd_text, cmd_text_size, "%s", token);
 
-    if (strcmp(token, "auto") == 0 || strcmp(token, "on") == 0 || strcmp(token, "o") == 0) return 'o';
-    if (strcmp(token, "manual") == 0 || strcmp(token, "off") == 0 || strcmp(token, "f") == 0 ||
-        strcmp(token, "unauto") == 0) return 'f';
+    /* RPi protocol allow-list: a/s/w/d/auto/unauto */
+    if (strcmp(token, "auto") == 0) return 'o';
+    if (strcmp(token, "unauto") == 0) return 'f';
     if (strcmp(token, "w") == 0) return 'w';
     if (strcmp(token, "a") == 0) return 'a';
     if (strcmp(token, "s") == 0) return 's';
