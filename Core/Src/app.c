@@ -13,6 +13,7 @@ extern I2C_HandleTypeDef hi2c1;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern osMessageQueueId_t uart_rx_queueHandle;
+extern osMessageQueueId_t control_queueHandle;
 
 typedef enum {
     MODE_AUTO = 0,
@@ -264,6 +265,12 @@ static char parse_motor_command(const uint8_t *payload, uint32_t len, char *cmd_
     return 0;
 }
 
+static uint8_t push_control_command(uint8_t cmd)
+{
+    if (control_queueHandle == NULL) return 0U;
+    return (osMessageQueuePut(control_queueHandle, &cmd, 0U, 0U) == osOK) ? 1U : 0U;
+}
+
 static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t len)
 {
     if (cmd == 0x05U) {
@@ -279,8 +286,8 @@ static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t
         char cmd_text[16] = {0};
         const char motor_cmd = parse_motor_command(payload, len, cmd_text, sizeof(cmd_text));
         if (motor_cmd != 0) {
-            handle_uart_command((uint8_t)motor_cmd);
-            proto_send_motor_ack(1U, cmd_text);
+            const uint8_t queued = push_control_command((uint8_t)motor_cmd);
+            proto_send_motor_ack(queued, cmd_text);
         } else {
             proto_send_motor_ack(0U, "invalid");
         }
@@ -301,7 +308,7 @@ void app_on_uart1_byte(uint8_t b)
     }
 }
 
-static void handle_uart_command(uint8_t cmd)
+static void apply_control_command(uint8_t cmd)
 {
     /* Mode command:
      * - 'o' (on): auto mode
@@ -339,6 +346,16 @@ static void handle_uart_command(uint8_t cmd)
     }
 }
 
+static void drain_control_queue(void)
+{
+    if (control_queueHandle == NULL) return;
+
+    uint8_t cmd = 0U;
+    while (osMessageQueueGet(control_queueHandle, &cmd, NULL, 0U) == osOK) {
+        apply_control_command(cmd);
+    }
+}
+
 void app_init(void)
 {
     motor_ctrl_init(&htim3);
@@ -361,7 +378,7 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart2) {
-        handle_uart_command(rx_data);
+        (void)push_control_command(rx_data);
         (void)HAL_UART_Receive_IT(&huart2, &rx_data, 1);
         return;
     }
@@ -375,10 +392,25 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
-void app_loop(void)
+void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
-    char detect_dir = '-';
+
+    /* UART/프로토콜 명령은 ControlTask에서만 반영 */
+    drain_control_queue();
+
+    if (current_mode == MODE_AUTO) {
+        if (mic_is_calibrated()) {
+            const uint32_t lock_until_ms = motor_ctrl_get_lock_until_ms();
+            const char detect_dir = mic_process(nowm, lock_until_ms);
+            motor_ctrl_process(nowm, detect_dir);
+        }
+    }
+}
+
+void app_sensor_loop(void)
+{
+    const uint32_t nowm = HAL_GetTick();
     const uint16_t pan_pwm = motor_ctrl_get_pan_pwm();
     const uint16_t tilt_pwm = motor_ctrl_get_tilt_pwm();
     const int32_t pan_deg = pwm_to_deg(pan_pwm, PAN_LEFT, PAN_RIGHT);
@@ -386,22 +418,16 @@ void app_loop(void)
 
     aht10_process(nowm);
 
-    if (current_mode == MODE_AUTO) {
-        if (mic_is_calibrated()) {
-            const uint32_t lock_until_ms = motor_ctrl_get_lock_until_ms();
-            detect_dir = mic_process(nowm, lock_until_ms);
-            motor_ctrl_process(nowm, detect_dir);
-        }
-    }
-
     static uint32_t last_dbg = 0U;
     if (nowm - last_dbg >= 200U) {
         if (current_mode == MODE_AUTO) {
             mic_debug_t dbg = {0};
             aht10_data_t th;
+            char detect_dir = '-';
 
             if (mic_is_calibrated()) {
                 mic_get_debug(&dbg);
+                detect_dir = dbg.detect_dir;
             }
             aht10_get_data(&th);
 
@@ -422,4 +448,11 @@ void app_loop(void)
         }
         last_dbg = nowm;
     }
+}
+
+void app_loop(void)
+{
+    /* Backward-compatible wrapper (non-RTOS or legacy call path) */
+    app_sensor_loop();
+    app_control_loop();
 }

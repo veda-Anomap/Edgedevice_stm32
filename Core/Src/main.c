@@ -642,8 +642,8 @@ void StartControlTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    app_loop();
-    osDelay(5);
+    app_control_loop();
+    osDelay(10);
   }
   /* USER CODE END StartControlTask */
 }
@@ -661,7 +661,8 @@ void StartSensorTask(void *argument)
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    app_sensor_loop();
+    osDelay(20);
   }
   /* USER CODE END StartSensorTask */
 }
