@@ -256,7 +256,8 @@ static char parse_motor_command(const uint8_t *payload, uint32_t len, char *cmd_
     (void)snprintf(cmd_text, cmd_text_size, "%s", token);
 
     if (strcmp(token, "auto") == 0 || strcmp(token, "on") == 0 || strcmp(token, "o") == 0) return 'o';
-    if (strcmp(token, "manual") == 0 || strcmp(token, "off") == 0 || strcmp(token, "f") == 0) return 'f';
+    if (strcmp(token, "manual") == 0 || strcmp(token, "off") == 0 || strcmp(token, "f") == 0 ||
+        strcmp(token, "unauto") == 0) return 'f';
     if (strcmp(token, "w") == 0) return 'w';
     if (strcmp(token, "a") == 0) return 'a';
     if (strcmp(token, "s") == 0) return 's';
@@ -325,8 +326,17 @@ static void apply_control_command(uint8_t cmd)
         return;
     }
 
-    if (current_mode == MODE_MANUAL) {
-        /* Manual commands */
+    /* Manual movement commands:
+     * if a movement command arrives in AUTO mode,
+     * switch to MANUAL first and then apply movement.
+     */
+    if (cmd == 'W' || cmd == 'w' || cmd == 'S' || cmd == 's' ||
+        cmd == 'A' || cmd == 'a' || cmd == 'D' || cmd == 'd') {
+        if (current_mode != MODE_MANUAL) {
+            current_mode = MODE_MANUAL;
+            motor_ctrl_enter_manual();
+        }
+
         if (cmd == 'W' || cmd == 'w') {
             manual_move_tilt(-50);
             return;
