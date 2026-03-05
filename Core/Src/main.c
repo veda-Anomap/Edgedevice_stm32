@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+﻿/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -171,7 +171,7 @@ int main(void)
   HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
   IR_LED_All_On();   // PB0, PB1, PB2 ON
   //IR_LED_All_Off(); // PB0, PB1, PB2 OFF
-  // HAL_ADC_Start(&hadc1); 기존 단발성으로 adc값을 읽었던 방식을 DMA로 변경해서 제거
+  // HAL_ADC_Start(&hadc1); 湲곗〈 ?占쎈컻?占쎌쑝占?adc媛믪쓣 ?占쎌뿀??諛⑹떇??DMA占?蹂寃쏀빐???占쎄굅
 //  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   app_init();
 
@@ -232,20 +232,14 @@ int main(void)
 
   /* We should never get here as control is now taken by the scheduler */
 
-  /* Infinite loop */
+  /* Infinite loop (RTOS: should not reach here) */
   /* USER CODE BEGIN WHILE */
-  static uint32_t max_adc = 0;
-  static uint32_t last_print = 0;
-  // ServoCal_Run(); // 임시 서보 확인용: 기본 동작에서는 비활성화
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-	  //app_loop(); //RTOS사용시 미실행
-
-	    }
+  }
   /* USER CODE END 3 */
 }
 
@@ -697,3 +691,4 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+

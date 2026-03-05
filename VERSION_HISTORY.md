@@ -5,6 +5,109 @@
 
 ---
 
+## [v0.9.4] - 2026-03-05
+### Dead Code 정리(main.c)
+- 대상 파일: `Core/Src/main.c`
+- 변경 내용:
+  - `osKernelStart()` 이후의 불필요한 `while` 블록 내부 dead code 정리
+  - 과거 `app_loop()` 호출 흔적 및 미사용 지역 변수 제거
+  - 주석을 `RTOS: should not reach here`로 명확화
+- 이유:
+  - 스케줄러 시작 후 해당 구간이 실행되지 않아 혼동을 유발하므로 가독성/유지보수성 개선
+
+### HAL Timebase를 TIM11로 분리
+- 대상 파일:
+  - `Core/Src/stm32f4xx_hal_timebase_tim.c` (신규)
+  - `Core/Src/stm32f4xx_it.c`
+  - `Core/Inc/stm32f4xx_it.h`
+  - `Core/Src/stm32f4xx_hal_msp.c`
+  - `irrled.ioc`
+- 변경 내용(코드):
+  - 신규 `HAL_InitTick()` 구현:
+    - `TIM11`을 1ms 주기로 설정/시작
+    - `HAL_SuspendTick()`, `HAL_ResumeTick()` 구현
+    - `HAL_TIM_PeriodElapsedCallback()`에서 `TIM11` update 이벤트 시 `HAL_IncTick()` 호출
+  - IRQ 연결:
+    - `TIM1_TRG_COM_TIM11_IRQHandler()` 추가
+    - 핸들러 내부 `HAL_TIM_IRQHandler(&htim11)` 호출
+  - `SysTick_Handler()`:
+    - `HAL_IncTick()` 제거
+    - FreeRTOS tick(`xPortSysTickHandler`) 전용으로 사용
+  - MSP 설정:
+    - `TIM11` clock enable/disable 추가
+    - `TIM1_TRG_COM_TIM11_IRQn` priority/NVIC enable/disable 추가
+- 변경 내용(ioc):
+  - `TIM11` IP 및 가상 핀(`VP_TIM11_VS_ClockSourceINT`) 추가
+  - `TIM11` NVIC 항목 추가
+  - Timebase 분리 구성 반영
+- 이유:
+  - FreeRTOS SysTick과 HAL tick을 분리해 시간기반 충돌 가능성을 낮추고 실무 안정성 향상
+
+---
+
+## [v0.9.3] - 2026-03-05
+### ControlTask / SensorTask 역할 분리 완료
+- 대상 파일: `Core/Inc/app.h`, `Core/Src/app.c`, `Core/Src/main.c`
+- 변경 목적:
+  - 제어 경로와 센서 경로를 분리해서, 센서 처리 지연이 모터 제어 주기를 막지 않도록 개선
+  - RTOS 역할 분리 원칙에 맞게 Task 책임을 명확화
+
+### 1) app 계층 함수 분리
+- `Core/Inc/app.h`
+  - 추가 API:
+    - `void app_control_loop(void);`
+    - `void app_sensor_loop(void);`
+- `Core/Src/app.c`
+  - `app_control_loop()` 추가:
+    - `drain_control_queue()`로 제어 명령 먼저 반영
+    - AUTO 모드에서만 `mic_process()` + `motor_ctrl_process()` 실행
+    - 모드/마이크/모터 제어 전담
+  - `app_sensor_loop()` 추가:
+    - `aht10_process(now)` 실행
+    - 주기 로그(ADC/방향/온습도/PAN/TILT) 출력
+    - 센서 갱신/상태 표시 전담
+  - `app_loop()`는 하위호환 wrapper로 유지:
+    - 내부에서 `app_sensor_loop()` + `app_control_loop()` 순서 호출
+
+### 2) 제어 명령 반영 지점 단일화(ControlTask 전담)
+- `Core/Src/app.c`
+  - 신규 함수:
+    - `push_control_command(uint8_t cmd)`:
+      - `control_queue`에 제어 명령 push
+    - `drain_control_queue(void)`:
+      - `control_queue`를 non-blocking으로 비우며 명령 적용
+    - `apply_control_command(uint8_t cmd)`:
+      - 기존 `handle_uart_command` 역할을 대체
+      - `o/f/w/a/s/d` 명령 실제 반영
+  - 변경점:
+    - UART2 RX ISR: 직접 제어 대신 `push_control_command()`만 수행
+    - UART1 `0x04` 프레임 파싱 후: 직접 제어 대신 `push_control_command()` 수행
+    - 즉, 모터/모드 상태 변경은 ControlTask에서만 발생
+
+### 3) Task 주기 조정
+- `Core/Src/main.c`
+  - `StartControlTask()`:
+    - `app_control_loop();`
+    - `osDelay(10);`  (10ms 제어 주기)
+  - `StartSensorTask()`:
+    - `app_sensor_loop();`
+    - `osDelay(20);`  (20ms 센서/상태 주기)
+
+### 4) 최종 실행 흐름
+- UART ISR:
+  - 큐 적재만 수행하고 즉시 return
+- UartRxTask:
+  - `uart_rx_queue`에서 바이트 수신 -> 프레임 조립/파싱
+  - `0x04` 명령은 `control_queue`로 전달
+  - `0x05`는 상태 응답 처리
+- ControlTask(10ms):
+  - `control_queue` 명령 반영
+  - AUTO 시 마이크 방향 판단 + 모터 제어
+- SensorTask(20ms):
+  - AHT10 상태머신/주기 갱신 + 로그 출력
+
+---
+
 ## [v0.9.2] - 2026-03-05
 ### UartRxTask를 실제 UART1 프레임 파서로 활성화
 - 대상 파일: `Core/Inc/app.h`, `Core/Src/app.c`, `Core/Src/main.c`

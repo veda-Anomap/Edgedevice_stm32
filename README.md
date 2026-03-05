@@ -74,9 +74,16 @@ JSON 키:
   - `a/d`: 팬 이동
 
 ## 5. FreeRTOS 현재 상태
-- `ControlTask`에서 `app_loop()` 주기 실행(`osDelay(5)`)
-- `UartRxTask`, `SensorTask`는 현재 기본 템플릿(확장 예정)
+- `UartRxTask`
+  - `uart_rx_queue`에서 UART1 바이트를 받아 프레임 조립/파싱
+- `ControlTask`
+  - `app_control_loop()` 실행(`osDelay(10)`)
+  - 모드/마이크/모터 제어 전담
+- `SensorTask`
+  - `app_sensor_loop()` 실행(`osDelay(20)`)
+  - `aht10_process()` 및 상태 로그/갱신 전담
 - 주의: `osKernelStart()` 이후 `main()`의 `while(1)`은 실행되지 않음
+- HAL timebase는 `TIM11`로 분리 구성(FreeRTOS SysTick과 분리)
 
 ## 6. 로그 출력
 - AUTO 모드:
