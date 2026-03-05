@@ -5,6 +5,29 @@
 
 ---
 
+## [v0.9.1] - 2026-03-05
+### UART1 ISR 최소화(Queue 기반) 적용
+- 대상 파일: `Core/Src/app.c`
+- 변경 목적:
+  - UART RX 인터럽트에서 파싱 부담을 제거하여 ISR 실행 시간을 최소화
+  - 프레임 드롭/지연 위험 완화
+- 변경 상세:
+  - `HAL_UART_RxCpltCallback()`의 `USART1` 경로에서
+    - 기존: `proto_rx_feed_byte(rx_data_rpi)` 직접 호출
+    - 변경: `osMessageQueuePut(uart_rx_queueHandle, &rx_data_rpi, 0, 0)`로 1바이트 큐 적재 후 즉시 리턴
+  - ISR 밖 파싱 함수 추가:
+    - `proto_drain_uart_rx_queue()`
+    - `osMessageQueueGet(..., timeout=0)`로 큐를 비우며 `proto_rx_feed_byte()` 호출
+  - `app_loop()` 시작부에 `proto_drain_uart_rx_queue()` 호출 추가
+    - ISR에서 적재된 UART1 바이트를 Task 컨텍스트에서 프레임 조립하도록 변경
+- 추가 선언:
+  - `#include "cmsis_os2.h"`
+  - `extern osMessageQueueId_t uart_rx_queueHandle;`
+- 참고:
+  - 큐가 아직 생성되지 않은 초기 시점에는 UART1 바이트를 무시하도록 가드 처리(`uart_rx_queueHandle != NULL`)
+
+---
+
 ## [v0.9.0] - 2026-03-04
 ### UART1(RPi) 바이너리 프레임 + JSON 파싱/응답 추가
 - 대상 파일: `Core/Src/app.c`
@@ -174,4 +197,3 @@
 ### 초기 버전
 - 듀얼 마이크 방향 감지 + 서보 구동 기본 동작
 - DMA 기반 ADC 샘플 처리 경로 구성
-
