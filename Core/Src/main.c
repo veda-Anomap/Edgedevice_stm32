@@ -617,10 +617,14 @@ void StartDefaultTask(void *argument)
 void StartUartRxTask(void *argument)
 {
   /* USER CODE BEGIN StartUartRxTask */
+  uint8_t rx_byte = 0U;
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+    if (osMessageQueueGet(uart_rx_queueHandle, &rx_byte, NULL, osWaitForever) == osOK) {
+      app_on_uart1_byte(rx_byte);
+    }
   }
   /* USER CODE END StartUartRxTask */
 }

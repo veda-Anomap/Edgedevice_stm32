@@ -196,17 +196,6 @@ static void proto_rx_feed_byte(uint8_t b)
     }
 }
 
-/* UART1 RX 큐에 쌓인 바이트를 ISR 밖에서 프레임 파서로 전달 */
-static void proto_drain_uart_rx_queue(void)
-{
-    if (uart_rx_queueHandle == NULL) return;
-
-    uint8_t b = 0U;
-    while (osMessageQueueGet(uart_rx_queueHandle, &b, NULL, 0U) == osOK) {
-        proto_rx_feed_byte(b);
-    }
-}
-
 static uint8_t proto_pop_frame(uint8_t *cmd, uint8_t *payload, uint32_t *len)
 {
     uint8_t has_frame = 0U;
@@ -299,6 +288,19 @@ static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t
     }
 }
 
+void app_on_uart1_byte(uint8_t b)
+{
+    uint8_t frame_cmd = 0U;
+    uint32_t frame_len = 0U;
+    uint8_t frame_payload[PROTO_MAX_PAYLOAD];
+
+    proto_rx_feed_byte(b);
+
+    while (proto_pop_frame(&frame_cmd, frame_payload, &frame_len) != 0U) {
+        process_protocol_frame(frame_cmd, frame_payload, frame_len);
+    }
+}
+
 static void handle_uart_command(uint8_t cmd)
 {
     /* Mode command:
@@ -381,16 +383,6 @@ void app_loop(void)
     const uint16_t tilt_pwm = motor_ctrl_get_tilt_pwm();
     const int32_t pan_deg = pwm_to_deg(pan_pwm, PAN_LEFT, PAN_RIGHT);
     const int32_t tilt_deg = pwm_to_deg(tilt_pwm, TILT_UP, TILT_DOWN);
-    uint8_t frame_cmd = 0U;
-    uint32_t frame_len = 0U;
-    uint8_t frame_payload[PROTO_MAX_PAYLOAD];
-
-    /* ISR에서 받은 UART1 바이트를 여기서 파싱 */
-    proto_drain_uart_rx_queue();
-
-    while (proto_pop_frame(&frame_cmd, frame_payload, &frame_len) != 0U) {
-        process_protocol_frame(frame_cmd, frame_payload, frame_len);
-    }
 
     aht10_process(nowm);
 
