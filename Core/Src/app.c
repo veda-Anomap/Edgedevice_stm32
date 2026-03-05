@@ -2,6 +2,7 @@
 #include "mic.h"
 #include "motor_ctrl.h"
 #include "aht10.h"
+#include "cmsis_os2.h"
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
@@ -11,6 +12,7 @@ extern TIM_HandleTypeDef htim3;
 extern I2C_HandleTypeDef hi2c1;
 extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
+extern osMessageQueueId_t uart_rx_queueHandle;
 
 typedef enum {
     MODE_AUTO = 0,
@@ -194,6 +196,17 @@ static void proto_rx_feed_byte(uint8_t b)
     }
 }
 
+/* UART1 RX 큐에 쌓인 바이트를 ISR 밖에서 프레임 파서로 전달 */
+static void proto_drain_uart_rx_queue(void)
+{
+    if (uart_rx_queueHandle == NULL) return;
+
+    uint8_t b = 0U;
+    while (osMessageQueueGet(uart_rx_queueHandle, &b, NULL, 0U) == osOK) {
+        proto_rx_feed_byte(b);
+    }
+}
+
 static uint8_t proto_pop_frame(uint8_t *cmd, uint8_t *payload, uint32_t *len)
 {
     uint8_t has_frame = 0U;
@@ -352,7 +365,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 
     if (huart == &huart1) {
-        proto_rx_feed_byte(rx_data_rpi);
+        if (uart_rx_queueHandle != NULL) {
+            (void)osMessageQueuePut(uart_rx_queueHandle, &rx_data_rpi, 0U, 0U);
+        }
         (void)HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1);
         return;
     }
@@ -369,6 +384,9 @@ void app_loop(void)
     uint8_t frame_cmd = 0U;
     uint32_t frame_len = 0U;
     uint8_t frame_payload[PROTO_MAX_PAYLOAD];
+
+    /* ISR에서 받은 UART1 바이트를 여기서 파싱 */
+    proto_drain_uart_rx_queue();
 
     while (proto_pop_frame(&frame_cmd, frame_payload, &frame_len) != 0U) {
         process_protocol_frame(frame_cmd, frame_payload, frame_len);
