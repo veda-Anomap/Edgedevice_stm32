@@ -5,6 +5,32 @@
 
 ---
 
+## [v0.9.2] - 2026-03-05
+### UartRxTask를 실제 UART1 프레임 파서로 활성화
+- 대상 파일: `Core/Inc/app.h`, `Core/Src/app.c`, `Core/Src/main.c`
+- 변경 목적:
+  - UART 프로토콜 파싱을 `app_loop` 경로에서 분리하고 `UartRxTask` 전담으로 전환
+  - RTOS 구조에 맞는 역할 분리(큐 소비/파싱/프레임 처리)
+- 변경 상세:
+  - `Core/Inc/app.h`
+    - `void app_on_uart1_byte(uint8_t b);` 공개 API 추가
+  - `Core/Src/app.c`
+    - `app_on_uart1_byte()` 추가
+      - 입력 바이트를 `proto_rx_feed_byte()` 상태머신에 투입
+      - 완성 프레임을 `proto_pop_frame()`로 꺼내 `process_protocol_frame()` 처리
+    - `app_loop()`에서 UART1 큐 드레인/프레임 처리 코드 제거
+      - UART1 파싱 책임을 Task로 완전히 이동
+  - `Core/Src/main.c`
+    - `StartUartRxTask()`를 실사용 로직으로 변경
+      - `osMessageQueueGet(uart_rx_queueHandle, ..., osWaitForever)`로 바이트 대기
+      - 수신 바이트를 `app_on_uart1_byte(rx_byte)`로 전달
+- 최종 동작 흐름:
+  - ISR(UART1): 큐에 1바이트 적재 후 즉시 리턴
+  - UartRxTask: 큐에서 바이트 수신 -> 프레임 조립 -> `0x04/0x05` 처리
+  - ControlTask: `app_loop()`로 센서/모터 주기 제어 유지
+
+---
+
 ## [v0.9.1] - 2026-03-05
 ### UART1 ISR 최소화(Queue 기반) 적용
 - 대상 파일: `Core/Src/app.c`
