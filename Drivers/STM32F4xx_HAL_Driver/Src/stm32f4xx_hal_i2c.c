@@ -1177,7 +1177,7 @@ HAL_StatusTypeDef HAL_I2C_Master_Transmit(I2C_HandleTypeDef *hi2c, uint16_t DevA
 HAL_StatusTypeDef HAL_I2C_Master_Receive(I2C_HandleTypeDef *hi2c, uint16_t DevAddress, uint8_t *pData, uint16_t Size, uint32_t Timeout)
 {
   /* Init tickstart for timeout management*/
-  uint32_t tickstart = HAL_GetTick();
+  uint32_t tickstart = HAL_GetTick();0
 
   if (hi2c->State == HAL_I2C_STATE_READY)
   {

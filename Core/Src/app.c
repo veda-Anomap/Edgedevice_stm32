@@ -2,6 +2,7 @@
 #include "mic.h"
 #include "motor_ctrl.h"
 #include "aht10.h"
+#include "pcf8591.h"
 #include "cmsis_os2.h"
 #include <stdio.h>
 #include <string.h>
@@ -76,6 +77,7 @@ static void proto_uart1_send_packet(uint8_t cmd, const char *json)
 static void proto_send_status_packet(void)
 {
     aht10_data_t th = {0};
+    pcf8591_data_t light = {0};
     mic_debug_t dbg = {0};
     char dir = '-';
 
@@ -84,6 +86,7 @@ static void proto_send_status_packet(void)
         dir = dbg.detect_dir;
     }
     aht10_get_data(&th);
+    pcf8591_get_data(&light);
 
     const uint16_t tilt_pwm = motor_ctrl_get_tilt_pwm();
     const int32_t tilt_deg = pwm_to_deg(tilt_pwm, TILT_UP, TILT_DOWN);
@@ -98,14 +101,15 @@ static void proto_send_status_packet(void)
                        (long)(t_abs / 100), (long)(t_abs % 100));
     }
 
-    char json[128];
+    char json[160];
     (void)snprintf(json, sizeof(json),
-                   "{\"tmp\":%s,\"hum\":%lu.%02lu,\"dir\":\"%c\",\"tilt\":%ld}",
+                   "{\"tmp\":%s,\"hum\":%lu.%02lu,\"dir\":\"%c\",\"tilt\":%ld,\"light\":%lu}",
                    temp_buf,
                    (unsigned long)(th.humidity_rh_x100 / 100U),
                    (unsigned long)(th.humidity_rh_x100 % 100U),
                    dir,
-                   (long)tilt_deg);
+                   (long)tilt_deg,
+                   (unsigned long)light.light_raw);
 
     proto_uart1_send_packet(0x05U, json);
 }
@@ -371,6 +375,7 @@ void app_init(void)
     motor_ctrl_init(&htim3);
     mic_init(&hadc1);
     aht10_init(&hi2c1, 2000U);
+    pcf8591_init(&hi2c1, 200U);
 
     /* Enable first UART RX interrupt (1 byte command) */
     (void)HAL_UART_Receive_IT(&huart2, &rx_data, 1);
@@ -427,12 +432,14 @@ void app_sensor_loop(void)
     const int32_t tilt_deg = pwm_to_deg(tilt_pwm, TILT_UP, TILT_DOWN);
 
     aht10_process(nowm);
+    pcf8591_process(nowm);
 
     static uint32_t last_dbg = 0U;
     if (nowm - last_dbg >= 200U) {
         if (current_mode == MODE_AUTO) {
             mic_debug_t dbg = {0};
             aht10_data_t th;
+            pcf8591_data_t light;
             char detect_dir = '-';
 
             if (mic_is_calibrated()) {
@@ -440,21 +447,25 @@ void app_sensor_loop(void)
                 detect_dir = dbg.detect_dir;
             }
             aht10_get_data(&th);
+            pcf8591_get_data(&light);
 
             const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
             const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
             printf("ADC_L:%4lu ADC_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
-                   "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%%\r\n",
+                   "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu\r\n",
                    (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                    (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
                    detect_dir,
                    (long)pan_deg, (long)tilt_deg,
                    temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
-                   (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U));
+                   (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
+                   (unsigned long)light.light_raw);
         } else {
-            printf("MODE:MANUAL | PAN:%3lddeg TILT:%3lddeg | PAN_PWM:%u TILT_PWM:%u\r\n",
-                   (long)pan_deg, (long)tilt_deg, pan_pwm, tilt_pwm);
+            pcf8591_data_t light;
+            pcf8591_get_data(&light);
+            printf("MODE:MANUAL | PAN:%3lddeg TILT:%3lddeg | PAN_PWM:%u TILT_PWM:%u | LIGHT:%3lu\r\n",
+                   (long)pan_deg, (long)tilt_deg, pan_pwm, tilt_pwm, (unsigned long)light.light_raw);
         }
         last_dbg = nowm;
     }
