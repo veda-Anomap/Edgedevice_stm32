@@ -1,403 +1,429 @@
-# Version History
+﻿# Version History
 
-프로젝트 변경 이력입니다.  
-날짜 형식: `YYYY-MM-DD`
+?꾨줈?앺듃 蹂寃??대젰?낅땲??  
+?좎쭨 ?뺤떇: `YYYY-MM-DD`
 
 ---
 
+## [v0.9.6] - 2026-03-10
+### PCF8591 조도센서 추가 + 상태 JSON 확장
+- 대상 파일:
+  - Core/Inc/pcf8591.h (신규)
+  - Core/Src/pcf8591.c (신규)
+  - Core/Src/app.c
+  - Debug/Core/Src/subdir.mk (로컬 빌드 항목 반영)
+- 구현 내용:
+  - I2C1 버스에 PCF8591(CH0) 주기 샘플링 모듈 추가
+  - PCF8591 읽기 시퀀스 적용
+    - Control byte 전송 (0x40, CH0)
+    - 2바이트 수신 후 첫 바이트(dummy) 폐기, 두 번째 바이트를 조도값으로 사용
+  - app_init()에서 pcf8591_init(&hi2c1, 200U) 추가
+  - app_sensor_loop()에서 pcf8591_process(now) 주기 호출 추가
+
+### UART1 상태 응답(JSON) 변경
+- 대상 파일: Core/Src/app.c
+- 변경 전 (CMD=0x05 응답):
+  - {"tmp":..,"hum":..,"dir":"..","tilt":..}
+- 변경 후 (CMD=0x05 응답):
+  - {"tmp":..,"hum":..,"dir":"..","tilt":..,"light":..}
+- 비고:
+  - light는 PCF8591 CH0의 8-bit 원시값(0~255)
+
+### UART1 모터 JSON 허용 토큰 정리
+- 대상 파일: Core/Src/app.c (parse_motor_command)
+- 허용 토큰(0x04 JSON):
+  - w, a, s, d, auto, unauto
+- 미허용 토큰:
+  - manual, on, off, o, f
+- 비고:
+  - UART2 단문 제어(o/f/w/a/s/d)는 기존 유지
+
+---
 ## [v0.9.5] - 2026-03-05
-### v0.9.4 상세 보강 기록 (Dead Code 정리 + TIM11 Timebase 분리)
-- 이 항목은 v0.9.4의 구현 의도/동작 원리를 더 자세히 남긴 보강 이력입니다.
+### v0.9.4 ?곸꽭 蹂닿컯 湲곕줉 (Dead Code ?뺣━ + TIM11 Timebase 遺꾨━)
+- ????ぉ? v0.9.4??援ы쁽 ?섎룄/?숈옉 ?먮━瑜????먯꽭???④릿 蹂닿컯 ?대젰?낅땲??
 
-### A) Dead Code 정리 상세 (`Core/Src/main.c`)
-- 변경 전:
-  - `osKernelStart()` 아래 `while (1)` 내부에 과거 베어메탈 흔적(`app_loop()` 주석, 미사용 지역 변수)이 남아 있었음.
-  - RTOS 구조에서 해당 구간은 실제로 실행되지 않는데 코드가 남아 있어 오해 가능성이 높았음.
-- 변경 후:
-  - `while (1)` 블록 내부를 최소 형태로 정리.
-  - 미사용 변수/과거 호출 흔적 제거.
-  - 주석을 `RTOS: should not reach here`로 명확히 표기.
-- 기술적 효과:
-  - 기능 변화는 없음(실행 경로 동일).
-  - 유지보수 시 "왜 여기 app_loop가 없지?" 같은 혼란 감소.
+### A) Dead Code ?뺣━ ?곸꽭 (`Core/Src/main.c`)
+- 蹂寃???
+  - `osKernelStart()` ?꾨옒 `while (1)` ?대???怨쇨굅 踰좎뼱硫뷀깉 ?붿쟻(`app_loop()` 二쇱꽍, 誘몄궗??吏??蹂?????⑥븘 ?덉뿀??
+  - RTOS 援ъ“?먯꽌 ?대떦 援ш컙? ?ㅼ젣濡??ㅽ뻾?섏? ?딅뒗??肄붾뱶媛 ?⑥븘 ?덉뼱 ?ㅽ빐 媛?μ꽦???믪븯??
+- 蹂寃???
+  - `while (1)` 釉붾줉 ?대?瑜?理쒖냼 ?뺥깭濡??뺣━.
+  - 誘몄궗??蹂??怨쇨굅 ?몄텧 ?붿쟻 ?쒓굅.
+  - 二쇱꽍??`RTOS: should not reach here`濡?紐낇솗???쒓린.
+- 湲곗닠???④낵:
+  - 湲곕뒫 蹂?붾뒗 ?놁쓬(?ㅽ뻾 寃쎈줈 ?숈씪).
+  - ?좎?蹂댁닔 ??"???ш린 app_loop媛 ?놁??" 媛숈? ?쇰? 媛먯냼.
 
-### B) HAL Timebase TIM11 분리 상세
-- 목적:
-  - FreeRTOS 스케줄링 tick(SysTick)과 HAL tick(HAL_GetTick/HAL_Delay 기반)을 분리하여 시간축 간섭 리스크를 낮춤.
+### B) HAL Timebase TIM11 遺꾨━ ?곸꽭
+- 紐⑹쟻:
+  - FreeRTOS ?ㅼ?以꾨쭅 tick(SysTick)怨?HAL tick(HAL_GetTick/HAL_Delay 湲곕컲)??遺꾨━?섏뿬 ?쒓컙異?媛꾩꽠 由ъ뒪?щ? ??땄.
 
-#### 1) 신규 파일 추가
-- 파일: `Core/Src/stm32f4xx_hal_timebase_tim.c`
-- 핵심 구현:
+#### 1) ?좉퇋 ?뚯씪 異붽?
+- ?뚯씪: `Core/Src/stm32f4xx_hal_timebase_tim.c`
+- ?듭떖 援ы쁽:
   - `HAL_InitTick(uint32_t TickPriority)`
-    - APB2 클럭 기반으로 TIM11 prescaler 계산.
-    - TIM11을 1MHz 카운터/1ms 주기로 설정.
-    - TIM11 update interrupt 시작.
+    - APB2 ?대윮 湲곕컲?쇰줈 TIM11 prescaler 怨꾩궛.
+    - TIM11??1MHz 移댁슫??1ms 二쇨린濡??ㅼ젙.
+    - TIM11 update interrupt ?쒖옉.
   - `HAL_SuspendTick()` / `HAL_ResumeTick()`
-    - TIM11 update IT on/off 제어.
+    - TIM11 update IT on/off ?쒖뼱.
   - `HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)`
-    - `htim->Instance == TIM11`일 때만 `HAL_IncTick()` 호출.
+    - `htim->Instance == TIM11`???뚮쭔 `HAL_IncTick()` ?몄텧.
 
-#### 2) 인터럽트 연결
-- 파일: `Core/Src/stm32f4xx_it.c`, `Core/Inc/stm32f4xx_it.h`
-- 변경:
-  - `TIM1_TRG_COM_TIM11_IRQHandler()` 추가.
-  - 핸들러에서 `HAL_TIM_IRQHandler(&htim11)` 호출.
-  - `SysTick_Handler()`에서 `HAL_IncTick()` 제거하고 RTOS tick 처리(`xPortSysTickHandler`)만 유지.
+#### 2) ?명꽣?쏀듃 ?곌껐
+- ?뚯씪: `Core/Src/stm32f4xx_it.c`, `Core/Inc/stm32f4xx_it.h`
+- 蹂寃?
+  - `TIM1_TRG_COM_TIM11_IRQHandler()` 異붽?.
+  - ?몃뱾?ъ뿉??`HAL_TIM_IRQHandler(&htim11)` ?몄텧.
+  - `SysTick_Handler()`?먯꽌 `HAL_IncTick()` ?쒓굅?섍퀬 RTOS tick 泥섎━(`xPortSysTickHandler`)留??좎?.
 
-#### 3) MSP(HAL 하위 초기화) 연결
-- 파일: `Core/Src/stm32f4xx_hal_msp.c`
-- 변경:
-  - `HAL_TIM_Base_MspInit()`에 `TIM11` 분기 추가:
+#### 3) MSP(HAL ?섏쐞 珥덇린?? ?곌껐
+- ?뚯씪: `Core/Src/stm32f4xx_hal_msp.c`
+- 蹂寃?
+  - `HAL_TIM_Base_MspInit()`??`TIM11` 遺꾧린 異붽?:
     - `__HAL_RCC_TIM11_CLK_ENABLE()`
     - `HAL_NVIC_SetPriority(TIM1_TRG_COM_TIM11_IRQn, TICK_INT_PRIORITY, 0)`
     - `HAL_NVIC_EnableIRQ(TIM1_TRG_COM_TIM11_IRQn)`
-  - `HAL_TIM_Base_MspDeInit()`에 `TIM11` 분기 추가:
+  - `HAL_TIM_Base_MspDeInit()`??`TIM11` 遺꾧린 異붽?:
     - clock disable + IRQ disable
 
-#### 4) IOC 반영
-- 파일: `irrled.ioc`
-- 반영값:
-  - `TIM11` IP 추가
-  - `VP_TIM11_VS_ClockSourceINT` 추가
-  - `TIM1_TRG_COM_TIM11_IRQn` 항목 추가
-  - TIM11 기본 주기/분주 파라미터 반영
+#### 4) IOC 諛섏쁺
+- ?뚯씪: `irrled.ioc`
+- 諛섏쁺媛?
+  - `TIM11` IP 異붽?
+  - `VP_TIM11_VS_ClockSourceINT` 異붽?
+  - `TIM1_TRG_COM_TIM11_IRQn` ??ぉ 異붽?
+  - TIM11 湲곕낯 二쇨린/遺꾩＜ ?뚮씪誘명꽣 諛섏쁺
 
-### C) 변경 후 시간축 동작 요약
+### C) 蹂寃????쒓컙異??숈옉 ?붿빟
 - SysTick:
-  - FreeRTOS 스케줄러 tick 전용.
+  - FreeRTOS ?ㅼ?以꾨윭 tick ?꾩슜.
 - TIM11 update interrupt:
-  - HAL tick 증가 전용(`HAL_IncTick()`).
-- 결과:
-  - RTOS scheduling과 HAL timebase가 분리되어 구조적으로 더 명확해짐.
+  - HAL tick 利앷? ?꾩슜(`HAL_IncTick()`).
+- 寃곌낵:
+  - RTOS scheduling怨?HAL timebase媛 遺꾨━?섏뼱 援ъ“?곸쑝濡???紐낇솗?댁쭚.
 
-### D) 주의/운영 포인트
-- CubeMX 코드 재생성 시:
-  - `stm32f4xx_hal_timebase_tim.c` 유지 여부
-  - TIM11 IRQ/ MSP 분기 유지 여부
-  - SysTick 핸들러 내용(의도치 않은 `HAL_IncTick()` 재삽입) 확인 필요.
-- 로컬 빌드:
-  - 현재 작업 환경에 `make`가 없어 빌드 실행은 미수행.
+### D) 二쇱쓽/?댁쁺 ?ъ씤??- CubeMX 肄붾뱶 ?ъ깮????
+  - `stm32f4xx_hal_timebase_tim.c` ?좎? ?щ?
+  - TIM11 IRQ/ MSP 遺꾧린 ?좎? ?щ?
+  - SysTick ?몃뱾???댁슜(?섎룄移??딆? `HAL_IncTick()` ?ъ궫?? ?뺤씤 ?꾩슂.
+- 濡쒖뺄 鍮뚮뱶:
+  - ?꾩옱 ?묒뾽 ?섍꼍??`make`媛 ?놁뼱 鍮뚮뱶 ?ㅽ뻾? 誘몄닔??
 
 ---
 
 ## [v0.9.4] - 2026-03-05
-### Dead Code 정리(main.c)
-- 대상 파일: `Core/Src/main.c`
-- 변경 내용:
-  - `osKernelStart()` 이후의 불필요한 `while` 블록 내부 dead code 정리
-  - 과거 `app_loop()` 호출 흔적 및 미사용 지역 변수 제거
-  - 주석을 `RTOS: should not reach here`로 명확화
-- 이유:
-  - 스케줄러 시작 후 해당 구간이 실행되지 않아 혼동을 유발하므로 가독성/유지보수성 개선
+### Dead Code ?뺣━(main.c)
+- ????뚯씪: `Core/Src/main.c`
+- 蹂寃??댁슜:
+  - `osKernelStart()` ?댄썑??遺덊븘?뷀븳 `while` 釉붾줉 ?대? dead code ?뺣━
+  - 怨쇨굅 `app_loop()` ?몄텧 ?붿쟻 諛?誘몄궗??吏??蹂???쒓굅
+  - 二쇱꽍??`RTOS: should not reach here`濡?紐낇솗??- ?댁쑀:
+  - ?ㅼ?以꾨윭 ?쒖옉 ???대떦 援ш컙???ㅽ뻾?섏? ?딆븘 ?쇰룞???좊컻?섎?濡?媛?낆꽦/?좎?蹂댁닔??媛쒖꽑
 
-### HAL Timebase를 TIM11로 분리
-- 대상 파일:
-  - `Core/Src/stm32f4xx_hal_timebase_tim.c` (신규)
+### HAL Timebase瑜?TIM11濡?遺꾨━
+- ????뚯씪:
+  - `Core/Src/stm32f4xx_hal_timebase_tim.c` (?좉퇋)
   - `Core/Src/stm32f4xx_it.c`
   - `Core/Inc/stm32f4xx_it.h`
   - `Core/Src/stm32f4xx_hal_msp.c`
   - `irrled.ioc`
-- 변경 내용(코드):
-  - 신규 `HAL_InitTick()` 구현:
-    - `TIM11`을 1ms 주기로 설정/시작
-    - `HAL_SuspendTick()`, `HAL_ResumeTick()` 구현
-    - `HAL_TIM_PeriodElapsedCallback()`에서 `TIM11` update 이벤트 시 `HAL_IncTick()` 호출
-  - IRQ 연결:
-    - `TIM1_TRG_COM_TIM11_IRQHandler()` 추가
-    - 핸들러 내부 `HAL_TIM_IRQHandler(&htim11)` 호출
+- 蹂寃??댁슜(肄붾뱶):
+  - ?좉퇋 `HAL_InitTick()` 援ы쁽:
+    - `TIM11`??1ms 二쇨린濡??ㅼ젙/?쒖옉
+    - `HAL_SuspendTick()`, `HAL_ResumeTick()` 援ы쁽
+    - `HAL_TIM_PeriodElapsedCallback()`?먯꽌 `TIM11` update ?대깽????`HAL_IncTick()` ?몄텧
+  - IRQ ?곌껐:
+    - `TIM1_TRG_COM_TIM11_IRQHandler()` 異붽?
+    - ?몃뱾???대? `HAL_TIM_IRQHandler(&htim11)` ?몄텧
   - `SysTick_Handler()`:
-    - `HAL_IncTick()` 제거
-    - FreeRTOS tick(`xPortSysTickHandler`) 전용으로 사용
-  - MSP 설정:
-    - `TIM11` clock enable/disable 추가
-    - `TIM1_TRG_COM_TIM11_IRQn` priority/NVIC enable/disable 추가
-- 변경 내용(ioc):
-  - `TIM11` IP 및 가상 핀(`VP_TIM11_VS_ClockSourceINT`) 추가
-  - `TIM11` NVIC 항목 추가
-  - Timebase 분리 구성 반영
-- 이유:
-  - FreeRTOS SysTick과 HAL tick을 분리해 시간기반 충돌 가능성을 낮추고 실무 안정성 향상
+    - `HAL_IncTick()` ?쒓굅
+    - FreeRTOS tick(`xPortSysTickHandler`) ?꾩슜?쇰줈 ?ъ슜
+  - MSP ?ㅼ젙:
+    - `TIM11` clock enable/disable 異붽?
+    - `TIM1_TRG_COM_TIM11_IRQn` priority/NVIC enable/disable 異붽?
+- 蹂寃??댁슜(ioc):
+  - `TIM11` IP 諛?媛???(`VP_TIM11_VS_ClockSourceINT`) 異붽?
+  - `TIM11` NVIC ??ぉ 異붽?
+  - Timebase 遺꾨━ 援ъ꽦 諛섏쁺
+- ?댁쑀:
+  - FreeRTOS SysTick怨?HAL tick??遺꾨━???쒓컙湲곕컲 異⑸룎 媛?μ꽦????텛怨??ㅻТ ?덉젙???μ긽
 
 ---
 
 ## [v0.9.3] - 2026-03-05
-### ControlTask / SensorTask 역할 분리 완료
-- 대상 파일: `Core/Inc/app.h`, `Core/Src/app.c`, `Core/Src/main.c`
-- 변경 목적:
-  - 제어 경로와 센서 경로를 분리해서, 센서 처리 지연이 모터 제어 주기를 막지 않도록 개선
-  - RTOS 역할 분리 원칙에 맞게 Task 책임을 명확화
-
-### 1) app 계층 함수 분리
+### ControlTask / SensorTask ??븷 遺꾨━ ?꾨즺
+- ????뚯씪: `Core/Inc/app.h`, `Core/Src/app.c`, `Core/Src/main.c`
+- 蹂寃?紐⑹쟻:
+  - ?쒖뼱 寃쎈줈? ?쇱꽌 寃쎈줈瑜?遺꾨━?댁꽌, ?쇱꽌 泥섎━ 吏?곗씠 紐⑦꽣 ?쒖뼱 二쇨린瑜?留됱? ?딅룄濡?媛쒖꽑
+  - RTOS ??븷 遺꾨━ ?먯튃??留욊쾶 Task 梨낆엫??紐낇솗??
+### 1) app 怨꾩링 ?⑥닔 遺꾨━
 - `Core/Inc/app.h`
-  - 추가 API:
+  - 異붽? API:
     - `void app_control_loop(void);`
     - `void app_sensor_loop(void);`
 - `Core/Src/app.c`
-  - `app_control_loop()` 추가:
-    - `drain_control_queue()`로 제어 명령 먼저 반영
-    - AUTO 모드에서만 `mic_process()` + `motor_ctrl_process()` 실행
-    - 모드/마이크/모터 제어 전담
-  - `app_sensor_loop()` 추가:
-    - `aht10_process(now)` 실행
-    - 주기 로그(ADC/방향/온습도/PAN/TILT) 출력
-    - 센서 갱신/상태 표시 전담
-  - `app_loop()`는 하위호환 wrapper로 유지:
-    - 내부에서 `app_sensor_loop()` + `app_control_loop()` 순서 호출
+  - `app_control_loop()` 異붽?:
+    - `drain_control_queue()`濡??쒖뼱 紐낅졊 癒쇱? 諛섏쁺
+    - AUTO 紐⑤뱶?먯꽌留?`mic_process()` + `motor_ctrl_process()` ?ㅽ뻾
+    - 紐⑤뱶/留덉씠??紐⑦꽣 ?쒖뼱 ?꾨떞
+  - `app_sensor_loop()` 異붽?:
+    - `aht10_process(now)` ?ㅽ뻾
+    - 二쇨린 濡쒓렇(ADC/諛⑺뼢/?⑥뒿??PAN/TILT) 異쒕젰
+    - ?쇱꽌 媛깆떊/?곹깭 ?쒖떆 ?꾨떞
+  - `app_loop()`???섏쐞?명솚 wrapper濡??좎?:
+    - ?대??먯꽌 `app_sensor_loop()` + `app_control_loop()` ?쒖꽌 ?몄텧
 
-### 2) 제어 명령 반영 지점 단일화(ControlTask 전담)
+### 2) ?쒖뼱 紐낅졊 諛섏쁺 吏???⑥씪??ControlTask ?꾨떞)
 - `Core/Src/app.c`
-  - 신규 함수:
+  - ?좉퇋 ?⑥닔:
     - `push_control_command(uint8_t cmd)`:
-      - `control_queue`에 제어 명령 push
+      - `control_queue`???쒖뼱 紐낅졊 push
     - `drain_control_queue(void)`:
-      - `control_queue`를 non-blocking으로 비우며 명령 적용
+      - `control_queue`瑜?non-blocking?쇰줈 鍮꾩슦硫?紐낅졊 ?곸슜
     - `apply_control_command(uint8_t cmd)`:
-      - 기존 `handle_uart_command` 역할을 대체
-      - `o/f/w/a/s/d` 명령 실제 반영
-  - 변경점:
-    - UART2 RX ISR: 직접 제어 대신 `push_control_command()`만 수행
-    - UART1 `0x04` 프레임 파싱 후: 직접 제어 대신 `push_control_command()` 수행
-    - 즉, 모터/모드 상태 변경은 ControlTask에서만 발생
+      - 湲곗〈 `handle_uart_command` ??븷???泥?      - `o/f/w/a/s/d` 紐낅졊 ?ㅼ젣 諛섏쁺
+  - 蹂寃쎌젏:
+    - UART2 RX ISR: 吏곸젒 ?쒖뼱 ???`push_control_command()`留??섑뻾
+    - UART1 `0x04` ?꾨젅???뚯떛 ?? 吏곸젒 ?쒖뼱 ???`push_control_command()` ?섑뻾
+    - 利? 紐⑦꽣/紐⑤뱶 ?곹깭 蹂寃쎌? ControlTask?먯꽌留?諛쒖깮
 
-### 3) Task 주기 조정
+### 3) Task 二쇨린 議곗젙
 - `Core/Src/main.c`
   - `StartControlTask()`:
     - `app_control_loop();`
-    - `osDelay(10);`  (10ms 제어 주기)
+    - `osDelay(10);`  (10ms ?쒖뼱 二쇨린)
   - `StartSensorTask()`:
     - `app_sensor_loop();`
-    - `osDelay(20);`  (20ms 센서/상태 주기)
+    - `osDelay(20);`  (20ms ?쇱꽌/?곹깭 二쇨린)
 
-### 4) 최종 실행 흐름
+### 4) 理쒖쥌 ?ㅽ뻾 ?먮쫫
 - UART ISR:
-  - 큐 적재만 수행하고 즉시 return
+  - ???곸옱留??섑뻾?섍퀬 利됱떆 return
 - UartRxTask:
-  - `uart_rx_queue`에서 바이트 수신 -> 프레임 조립/파싱
-  - `0x04` 명령은 `control_queue`로 전달
-  - `0x05`는 상태 응답 처리
+  - `uart_rx_queue`?먯꽌 諛붿씠???섏떊 -> ?꾨젅??議곕┰/?뚯떛
+  - `0x04` 紐낅졊? `control_queue`濡??꾨떖
+  - `0x05`???곹깭 ?묐떟 泥섎━
 - ControlTask(10ms):
-  - `control_queue` 명령 반영
-  - AUTO 시 마이크 방향 판단 + 모터 제어
+  - `control_queue` 紐낅졊 諛섏쁺
+  - AUTO ??留덉씠??諛⑺뼢 ?먮떒 + 紐⑦꽣 ?쒖뼱
 - SensorTask(20ms):
-  - AHT10 상태머신/주기 갱신 + 로그 출력
+  - AHT10 ?곹깭癒몄떊/二쇨린 媛깆떊 + 濡쒓렇 異쒕젰
 
 ---
 
 ## [v0.9.2] - 2026-03-05
-### UartRxTask를 실제 UART1 프레임 파서로 활성화
-- 대상 파일: `Core/Inc/app.h`, `Core/Src/app.c`, `Core/Src/main.c`
-- 변경 목적:
-  - UART 프로토콜 파싱을 `app_loop` 경로에서 분리하고 `UartRxTask` 전담으로 전환
-  - RTOS 구조에 맞는 역할 분리(큐 소비/파싱/프레임 처리)
-- 변경 상세:
+### UartRxTask瑜??ㅼ젣 UART1 ?꾨젅???뚯꽌濡??쒖꽦??- ????뚯씪: `Core/Inc/app.h`, `Core/Src/app.c`, `Core/Src/main.c`
+- 蹂寃?紐⑹쟻:
+  - UART ?꾨줈?좎퐳 ?뚯떛??`app_loop` 寃쎈줈?먯꽌 遺꾨━?섍퀬 `UartRxTask` ?꾨떞?쇰줈 ?꾪솚
+  - RTOS 援ъ“??留욌뒗 ??븷 遺꾨━(???뚮퉬/?뚯떛/?꾨젅??泥섎━)
+- 蹂寃??곸꽭:
   - `Core/Inc/app.h`
-    - `void app_on_uart1_byte(uint8_t b);` 공개 API 추가
+    - `void app_on_uart1_byte(uint8_t b);` 怨듦컻 API 異붽?
   - `Core/Src/app.c`
-    - `app_on_uart1_byte()` 추가
-      - 입력 바이트를 `proto_rx_feed_byte()` 상태머신에 투입
-      - 완성 프레임을 `proto_pop_frame()`로 꺼내 `process_protocol_frame()` 처리
-    - `app_loop()`에서 UART1 큐 드레인/프레임 처리 코드 제거
-      - UART1 파싱 책임을 Task로 완전히 이동
+    - `app_on_uart1_byte()` 異붽?
+      - ?낅젰 諛붿씠?몃? `proto_rx_feed_byte()` ?곹깭癒몄떊???ъ엯
+      - ?꾩꽦 ?꾨젅?꾩쓣 `proto_pop_frame()`濡?爰쇰궡 `process_protocol_frame()` 泥섎━
+    - `app_loop()`?먯꽌 UART1 ???쒕젅???꾨젅??泥섎━ 肄붾뱶 ?쒓굅
+      - UART1 ?뚯떛 梨낆엫??Task濡??꾩쟾???대룞
   - `Core/Src/main.c`
-    - `StartUartRxTask()`를 실사용 로직으로 변경
-      - `osMessageQueueGet(uart_rx_queueHandle, ..., osWaitForever)`로 바이트 대기
-      - 수신 바이트를 `app_on_uart1_byte(rx_byte)`로 전달
-- 최종 동작 흐름:
-  - ISR(UART1): 큐에 1바이트 적재 후 즉시 리턴
-  - UartRxTask: 큐에서 바이트 수신 -> 프레임 조립 -> `0x04/0x05` 처리
-  - ControlTask: `app_loop()`로 센서/모터 주기 제어 유지
+    - `StartUartRxTask()`瑜??ㅼ궗??濡쒖쭅?쇰줈 蹂寃?      - `osMessageQueueGet(uart_rx_queueHandle, ..., osWaitForever)`濡?諛붿씠???湲?      - ?섏떊 諛붿씠?몃? `app_on_uart1_byte(rx_byte)`濡??꾨떖
+- 理쒖쥌 ?숈옉 ?먮쫫:
+  - ISR(UART1): ?먯뿉 1諛붿씠???곸옱 ??利됱떆 由ы꽩
+  - UartRxTask: ?먯뿉??諛붿씠???섏떊 -> ?꾨젅??議곕┰ -> `0x04/0x05` 泥섎━
+  - ControlTask: `app_loop()`濡??쇱꽌/紐⑦꽣 二쇨린 ?쒖뼱 ?좎?
 
 ---
 
 ## [v0.9.1] - 2026-03-05
-### UART1 ISR 최소화(Queue 기반) 적용
-- 대상 파일: `Core/Src/app.c`
-- 변경 목적:
-  - UART RX 인터럽트에서 파싱 부담을 제거하여 ISR 실행 시간을 최소화
-  - 프레임 드롭/지연 위험 완화
-- 변경 상세:
-  - `HAL_UART_RxCpltCallback()`의 `USART1` 경로에서
-    - 기존: `proto_rx_feed_byte(rx_data_rpi)` 직접 호출
-    - 변경: `osMessageQueuePut(uart_rx_queueHandle, &rx_data_rpi, 0, 0)`로 1바이트 큐 적재 후 즉시 리턴
-  - ISR 밖 파싱 함수 추가:
+### UART1 ISR 理쒖냼??Queue 湲곕컲) ?곸슜
+- ????뚯씪: `Core/Src/app.c`
+- 蹂寃?紐⑹쟻:
+  - UART RX ?명꽣?쏀듃?먯꽌 ?뚯떛 遺?댁쓣 ?쒓굅?섏뿬 ISR ?ㅽ뻾 ?쒓컙??理쒖냼??  - ?꾨젅???쒕∼/吏???꾪뿕 ?꾪솕
+- 蹂寃??곸꽭:
+  - `HAL_UART_RxCpltCallback()`??`USART1` 寃쎈줈?먯꽌
+    - 湲곗〈: `proto_rx_feed_byte(rx_data_rpi)` 吏곸젒 ?몄텧
+    - 蹂寃? `osMessageQueuePut(uart_rx_queueHandle, &rx_data_rpi, 0, 0)`濡?1諛붿씠?????곸옱 ??利됱떆 由ы꽩
+  - ISR 諛??뚯떛 ?⑥닔 異붽?:
     - `proto_drain_uart_rx_queue()`
-    - `osMessageQueueGet(..., timeout=0)`로 큐를 비우며 `proto_rx_feed_byte()` 호출
-  - `app_loop()` 시작부에 `proto_drain_uart_rx_queue()` 호출 추가
-    - ISR에서 적재된 UART1 바이트를 Task 컨텍스트에서 프레임 조립하도록 변경
-- 추가 선언:
+    - `osMessageQueueGet(..., timeout=0)`濡??먮? 鍮꾩슦硫?`proto_rx_feed_byte()` ?몄텧
+  - `app_loop()` ?쒖옉遺??`proto_drain_uart_rx_queue()` ?몄텧 異붽?
+    - ISR?먯꽌 ?곸옱??UART1 諛붿씠?몃? Task 而⑦뀓?ㅽ듃?먯꽌 ?꾨젅??議곕┰?섎룄濡?蹂寃?- 異붽? ?좎뼵:
   - `#include "cmsis_os2.h"`
   - `extern osMessageQueueId_t uart_rx_queueHandle;`
-- 참고:
-  - 큐가 아직 생성되지 않은 초기 시점에는 UART1 바이트를 무시하도록 가드 처리(`uart_rx_queueHandle != NULL`)
+- 李멸퀬:
+  - ?먭? ?꾩쭅 ?앹꽦?섏? ?딆? 珥덇린 ?쒖젏?먮뒗 UART1 諛붿씠?몃? 臾댁떆?섎룄濡?媛??泥섎━(`uart_rx_queueHandle != NULL`)
 
 ---
 
 ## [v0.9.0] - 2026-03-04
-### UART1(RPi) 바이너리 프레임 + JSON 파싱/응답 추가
-- 대상 파일: `Core/Src/app.c`
-- 추가 매크로/상수:
-  - `PROTO_MAX_PAYLOAD` (최대 payload 192B)
-- 추가 상태머신:
+### UART1(RPi) 諛붿씠?덈━ ?꾨젅??+ JSON ?뚯떛/?묐떟 異붽?
+- ????뚯씪: `Core/Src/app.c`
+- 異붽? 留ㅽ겕濡??곸닔:
+  - `PROTO_MAX_PAYLOAD` (理쒕? payload 192B)
+- 異붽? ?곹깭癒몄떊:
   - `proto_rx_state_t`
-  - 상태: `PROTO_RX_WAIT_CMD -> PROTO_RX_WAIT_LEN_0..3 -> PROTO_RX_WAIT_PAYLOAD`
-- 추가 버퍼/상태 변수:
+  - ?곹깭: `PROTO_RX_WAIT_CMD -> PROTO_RX_WAIT_LEN_0..3 -> PROTO_RX_WAIT_PAYLOAD`
+- 異붽? 踰꾪띁/?곹깭 蹂??
   - `s_proto_state`, `s_proto_cmd`, `s_proto_len`, `s_proto_idx`
   - `s_proto_rx_buf[]`
   - `s_frame_ready`, `s_frame_cmd`, `s_frame_len`, `s_frame_payload[]`
-- 추가 함수:
+- 異붽? ?⑥닔:
   - `proto_rx_feed_byte(uint8_t b)`
-    - UART1에서 1바이트씩 입력받아 프레임 조립
-    - 길이 필드 4바이트는 big-endian 해석
-    - 길이 초과 시 reset
+    - UART1?먯꽌 1諛붿씠?몄뵫 ?낅젰諛쏆븘 ?꾨젅??議곕┰
+    - 湲몄씠 ?꾨뱶 4諛붿씠?몃뒗 big-endian ?댁꽍
+    - 湲몄씠 珥덇낵 ??reset
   - `proto_publish_frame(...)`
-    - ISR 파싱 결과를 단일 슬롯 프레임 버퍼에 게시
+    - ISR ?뚯떛 寃곌낵瑜??⑥씪 ?щ’ ?꾨젅??踰꾪띁??寃뚯떆
   - `proto_pop_frame(...)`
-    - 메인 로직에서 게시된 프레임 꺼냄(IRQ 보호)
+    - 硫붿씤 濡쒖쭅?먯꽌 寃뚯떆???꾨젅??爰쇰깂(IRQ 蹂댄샇)
   - `process_protocol_frame(...)`
-    - `0x05`(상태요청) / `0x04`(모터명령) 분기 처리
+    - `0x05`(?곹깭?붿껌) / `0x04`(紐⑦꽣紐낅졊) 遺꾧린 泥섎━
   - `parse_motor_command(...)`
-    - JSON 문자열에서 `"motor"` 키를 탐색
-    - 값 토큰을 추출해 내부 단문 명령(`o/f/w/a/s/d`)으로 매핑
-    - 매핑 허용값: `auto/manual/on/off/o/f/w/a/s/d`
+    - JSON 臾몄옄?댁뿉??`"motor"` ?ㅻ? ?먯깋
+    - 媛??좏겙??異붿텧???대? ?⑤Ц 紐낅졊(`o/f/w/a/s/d`)?쇰줈 留ㅽ븨
+    - 留ㅽ븨 ?덉슜媛? `auto/manual/on/off/o/f/w/a/s/d`
   - `proto_uart1_send_packet(...)`
-    - `CMD(1) + LEN(4) + JSON` 형태로 UART1 송신
+    - `CMD(1) + LEN(4) + JSON` ?뺥깭濡?UART1 ?≪떊
   - `proto_send_status_packet()`
-    - 상태 응답 JSON 생성:
+    - ?곹깭 ?묐떟 JSON ?앹꽦:
     - `{"tmp":..,"hum":..,"dir":"..","tilt":..}`
   - `proto_send_motor_ack(...)`
-    - 모터 명령 ACK JSON 생성:
+    - 紐⑦꽣 紐낅졊 ACK JSON ?앹꽦:
     - `{"ok":1/0,"mode":"auto/manual","cmd":"..."}`
-- UART 콜백 변경:
-  - `HAL_UART_RxCpltCallback`에서
-    - `USART2`: 기존 1바이트 수동 명령 처리 유지
-    - `USART1`: `proto_rx_feed_byte()` 호출 후 인터럽트 재활성화
-- 초기화 변경:
-  - `app_init()`에서 `HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1)` 추가
+- UART 肄쒕갚 蹂寃?
+  - `HAL_UART_RxCpltCallback`?먯꽌
+    - `USART2`: 湲곗〈 1諛붿씠???섎룞 紐낅졊 泥섎━ ?좎?
+    - `USART1`: `proto_rx_feed_byte()` ?몄텧 ???명꽣?쏀듃 ?ы솢?깊솕
+- 珥덇린??蹂寃?
+  - `app_init()`?먯꽌 `HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1)` 異붽?
 
-### AUTO/MANUAL 출력 정보 확장
-- 대상 파일: `Core/Src/app.c`
-- 추가 함수:
+### AUTO/MANUAL 異쒕젰 ?뺣낫 ?뺤옣
+- ????뚯씪: `Core/Src/app.c`
+- 異붽? ?⑥닔:
   - `pwm_to_deg(uint16_t pwm, uint16_t min_pwm, uint16_t max_pwm)`
-    - PWM 범위를 0~180도로 선형 변환
-- 로그 변경:
-  - AUTO 로그에 `PAN/TILT` 각도 추가
-  - MANUAL 로그 추가:
+    - PWM 踰붿쐞瑜?0~180?꾨줈 ?좏삎 蹂??- 濡쒓렇 蹂寃?
+  - AUTO 濡쒓렇??`PAN/TILT` 媛곷룄 異붽?
+  - MANUAL 濡쒓렇 異붽?:
     - `MODE:MANUAL | PAN:xdeg TILT:ydeg | PAN_PWM:... TILT_PWM:...`
 
-### FreeRTOS 실행 경로 보정
-- 대상 파일: `Core/Src/main.c`
-- `StartControlTask()`에 `app_loop()` 호출 추가
+### FreeRTOS ?ㅽ뻾 寃쎈줈 蹂댁젙
+- ????뚯씪: `Core/Src/main.c`
+- `StartControlTask()`??`app_loop()` ?몄텧 異붽?
   - `app_loop(); osDelay(5);`
-- 의도:
-  - `osKernelStart()` 이후 실질 동작이 Task 컨텍스트에서 수행되도록 보정
+- ?섎룄:
+  - `osKernelStart()` ?댄썑 ?ㅼ쭏 ?숈옉??Task 而⑦뀓?ㅽ듃?먯꽌 ?섑뻾?섎룄濡?蹂댁젙
 
 ---
 
 ## [v0.8.0] - 2026-03-04
-### RTOS 친화 지연 처리로 전환
-- 대상 파일: `Core/Src/motor.c`, `Core/Src/servo_calc.c`
-- 변경 이유:
-  - RTOS 환경에서 `HAL_Delay` 블로킹 영향을 줄이기 위함
-- 변경 내용:
-  - `cmsis_os2.h` 포함
-  - `delay_ms(uint32_t ms)` 헬퍼 추가
-    - 커널 실행 중: `osDelay(ms)`
-    - 커널 시작 전: `HAL_Delay(ms)`
-  - 기존 `HAL_Delay(...)` 호출을 `delay_ms(...)`로 치환
+### RTOS 移쒗솕 吏??泥섎━濡??꾪솚
+- ????뚯씪: `Core/Src/motor.c`, `Core/Src/servo_calc.c`
+- 蹂寃??댁쑀:
+  - RTOS ?섍꼍?먯꽌 `HAL_Delay` 釉붾줈???곹뼢??以꾩씠湲??꾪븿
+- 蹂寃??댁슜:
+  - `cmsis_os2.h` ?ы븿
+  - `delay_ms(uint32_t ms)` ?ы띁 異붽?
+    - 而ㅻ꼸 ?ㅽ뻾 以? `osDelay(ms)`
+    - 而ㅻ꼸 ?쒖옉 ?? `HAL_Delay(ms)`
+  - 湲곗〈 `HAL_Delay(...)` ?몄텧??`delay_ms(...)`濡?移섑솚
 
 ---
 
 ## [v0.7.0] - 2026-03-03
-### 자동/수동 모드 제어 체계 업데이트
-- 대상 파일: `Core/Src/app.c`, `Core/Src/motor_ctrl.c`, `Core/Inc/motor_ctrl.h`
-- 모드 명령:
+### ?먮룞/?섎룞 紐⑤뱶 ?쒖뼱 泥닿퀎 ?낅뜲?댄듃
+- ????뚯씪: `Core/Src/app.c`, `Core/Src/motor_ctrl.c`, `Core/Inc/motor_ctrl.h`
+- 紐⑤뱶 紐낅졊:
   - `o/O` -> AUTO
   - `f/F` -> MANUAL
-- 수동 명령:
-  - `W/S`(틸트), `A/D`(팬)
-- 함수 추가/사용:
+- ?섎룞 紐낅졊:
+  - `W/S`(?명듃), `A/D`(??
+- ?⑥닔 異붽?/?ъ슜:
   - `motor_ctrl_enter_auto()`
   - `motor_ctrl_enter_manual()`
   - `manual_move_pan(int step)`
   - `manual_move_tilt(int step)`
-- AUTO 재진입 시 팬/틸트 센터 복귀 로직 추가
+- AUTO ?ъ쭊???????명듃 ?쇳꽣 蹂듦? 濡쒖쭅 異붽?
 
-### 2축 팬틸트 제어 확정
-- 대상 파일: `Core/Src/motor_ctrl.c`
-- 채널:
+### 2異??ы떥???쒖뼱 ?뺤젙
+- ????뚯씪: `Core/Src/motor_ctrl.c`
+- 梨꾨꼸:
   - PAN -> `TIM3_CH1`
   - TILT -> `TIM3_CH2`
-- 상태 변수:
+- ?곹깭 蹂??
   - `current_pan_pwm`, `current_tilt_pwm`
-- 방어 로직:
-  - 한계 PWM clamp 처리
+- 諛⑹뼱 濡쒖쭅:
+  - ?쒓퀎 PWM clamp 泥섎━
 
 ---
 
 ## [v0.6.0] - 2026-03-03
-### 마이크 방향 판정 게이트 단순화
-- 대상 파일: `Core/Src/mic.c`
-- 의사결정 게이트를 핵심 3개로 단순화:
+### 留덉씠??諛⑺뼢 ?먯젙 寃뚯씠???⑥닚??- ????뚯씪: `Core/Src/mic.c`
+- ?섏궗寃곗젙 寃뚯씠?몃? ?듭떖 3媛쒕줈 ?⑥닚??
   - `SOUND_TH`
   - `SNR_TH_Q8`
   - `DIR_RATIO_TH_Q8`
-- 제거된 방향 확정 조건:
-  - `DIFF_TH`, `SNR_DIFF_TH_Q8`, `PEAK_DIFF_TH` (의사결정 경로에서 제외)
-- 목적:
-  - 튜닝 포인트 축소
-  - 오탐/미탐 트레이드오프를 현장에서 빠르게 맞추기 쉽게 개선
+- ?쒓굅??諛⑺뼢 ?뺤젙 議곌굔:
+  - `DIFF_TH`, `SNR_DIFF_TH_Q8`, `PEAK_DIFF_TH` (?섏궗寃곗젙 寃쎈줈?먯꽌 ?쒖쇅)
+- 紐⑹쟻:
+  - ?쒕떇 ?ъ씤??異뺤냼
+  - ?ㅽ깘/誘명깘 ?몃젅?대뱶?ㅽ봽瑜??꾩옣?먯꽌 鍮좊Ⅴ寃?留욎텛湲??쎄쾶 媛쒖꽑
 
 ---
 
 ## [v0.5.0] - 2026-03-03
-### AHT10 필터링 강화 (N=10 FIFO 이동평균)
-- 대상 파일: `Core/Src/aht10.c`
-- 추가 상수/변수:
+### AHT10 ?꾪꽣留?媛뺥솕 (N=10 FIFO ?대룞?됯퇏)
+- ????뚯씪: `Core/Src/aht10.c`
+- 異붽? ?곸닔/蹂??
   - `AHT10_FILTER_WIN = 10`
   - `s_temp_hist[]`, `s_humi_hist[]`
   - `s_hist_idx`, `s_hist_count`, `s_temp_sum`, `s_humi_sum`
-- 추가 함수:
+- 異붽? ?⑥닔:
   - `aht10_filter_push(...)`
-- 동작:
-  - 새 샘플 입력 시 가장 오래된 샘플 제거 후 합계 갱신(O(1))
-  - 단일 샘플 출력 대신 최근 N개 평균 출력
+- ?숈옉:
+  - ???섑뵆 ?낅젰 ??媛???ㅻ옒???섑뵆 ?쒓굅 ???⑷퀎 媛깆떊(O(1))
+  - ?⑥씪 ?섑뵆 異쒕젰 ???理쒓렐 N媛??됯퇏 異쒕젰
 
 ---
 
 ## [v0.4.0] - 2026-03-03
-### AHT10 모듈 분리 및 상태머신 적용
-- 대상 파일: `Core/Src/aht10.c`, `Core/Inc/aht10.h`
-- 구성:
+### AHT10 紐⑤뱢 遺꾨━ 諛??곹깭癒몄떊 ?곸슜
+- ????뚯씪: `Core/Src/aht10.c`, `Core/Inc/aht10.h`
+- 援ъ꽦:
   - `aht10_init()`, `aht10_process()`, `aht10_get_data()`
-- 핵심 로직:
-  - 주기 측정(기본 2000ms)
-  - 변환 대기(약 80ms)
-  - BUSY 비트 확인 후 재시도
-- 목적:
-  - 센서 자가발열 완화
-  - 측정 완료 전 읽기 오류 방지
+- ?듭떖 濡쒖쭅:
+  - 二쇨린 痢≪젙(湲곕낯 2000ms)
+  - 蹂???湲???80ms)
+  - BUSY 鍮꾪듃 ?뺤씤 ???ъ떆??- 紐⑹쟻:
+  - ?쇱꽌 ?먭?諛쒖뿴 ?꾪솕
+  - 痢≪젙 ?꾨즺 ???쎄린 ?ㅻ쪟 諛⑹?
 
 ---
 
 ## [v0.3.0] - 2026-03-03
-### 모듈 분리 리팩토링
-- `mic`, `motor_ctrl`, `aht10`, `ir_led` 모듈 분리
-- `app.c`를 연계 오케스트레이션 계층으로 정리
+### 紐⑤뱢 遺꾨━ 由ы뙥?좊쭅
+- `mic`, `motor_ctrl`, `aht10`, `ir_led` 紐⑤뱢 遺꾨━
+- `app.c`瑜??곌퀎 ?ㅼ??ㅽ듃?덉씠??怨꾩링?쇰줈 ?뺣━
 
-### IR LED 코드 분리
-- 대상 파일: `Core/Src/ir_led.c`, `Core/Inc/ir_led.h`
-- PB0/PB1/PB2 제어를 별도 모듈로 분리
+### IR LED 肄붾뱶 遺꾨━
+- ????뚯씪: `Core/Src/ir_led.c`, `Core/Inc/ir_led.h`
+- PB0/PB1/PB2 ?쒖뼱瑜?蹂꾨룄 紐⑤뱢濡?遺꾨━
 
 ---
 
 ## [v0.2.0] - 2026-03-03
-### 수동 조작 기능 도입
-- UART 단문 명령 기반 수동 조작 추가
-- 팬/틸트 step 제어 및 모드 전환 동작 정리
+### ?섎룞 議곗옉 湲곕뒫 ?꾩엯
+- UART ?⑤Ц 紐낅졊 湲곕컲 ?섎룞 議곗옉 異붽?
+- ???명듃 step ?쒖뼱 諛?紐⑤뱶 ?꾪솚 ?숈옉 ?뺣━
 
 ---
 
 ## [v0.1.0] - 2026-03-03
-### 초기 버전
-- 듀얼 마이크 방향 감지 + 서보 구동 기본 동작
-- DMA 기반 ADC 샘플 처리 경로 구성
+### 珥덇린 踰꾩쟾
+- ???留덉씠??諛⑺뼢 媛먯? + ?쒕낫 援щ룞 湲곕낯 ?숈옉
+- DMA 湲곕컲 ADC ?섑뵆 泥섎━ 寃쎈줈 援ъ꽦
+
+
+
+

@@ -420,6 +420,8 @@ void app_control_loop(void)
             const char detect_dir = mic_process(nowm, lock_until_ms);
             motor_ctrl_process(nowm, detect_dir);
         }
+    } else {
+        motor_ctrl_manual_process(nowm);
     }
 }
 

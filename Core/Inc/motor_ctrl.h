@@ -15,6 +15,7 @@
 
 void motor_ctrl_init(TIM_HandleTypeDef *htim);
 void motor_ctrl_process(uint32_t now_ms, char detect_dir);
+void motor_ctrl_manual_process(uint32_t now_ms);
 uint32_t motor_ctrl_get_lock_until_ms(void);
 
 /* 수동 모드 제어 API */
