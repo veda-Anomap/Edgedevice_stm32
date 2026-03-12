@@ -18,6 +18,7 @@ extern I2S_HandleTypeDef hi2s2;
 #define SOUND_TH       390U
 #define ALPHA_DIV      8U
 #define SWITCH_HOLDOFF 200U
+#define MIC_MID_U16    32768U
 
 /* Sliding windows and SNR gates */
 #define SIG_WIN         12U
@@ -27,9 +28,7 @@ extern I2S_HandleTypeDef hi2s2;
 #define DIR_RATIO_TH_Q8 384U
 
 /* Shared states updated in ISR context */
-static volatile uint32_t baseL = 0U, baseR = 0U;
 static volatile uint32_t lvlL = 0U, lvlR = 0U;
-static volatile uint8_t is_calibrated = 0U;
 static volatile uint32_t peakL = 0U, peakR = 0U;
 static volatile uint32_t adcAvgL = 0U, adcAvgR = 0U;
 static volatile uint32_t noiseL = 1U, noiseR = 1U;
@@ -94,14 +93,12 @@ static void mic_reset_state(void)
     detectLR = '-';
     last_switch_ms = HAL_GetTick();
 
-    baseL = baseR = 0U;
     lvlL = lvlR = 0U;
     peakL = peakR = 0U;
     adcAvgL = adcAvgR = 0U;
     noiseL = noiseR = 1U;
     snrL_q8 = snrR_q8 = 0U;
     noise_ready = 0U;
-    is_calibrated = 0U;
 
     gate_sound_dbg = gate_snr_dbg = gate_ratio_dbg = 0U;
     diff_dbg = 0U;
@@ -125,18 +122,6 @@ static void mic_process_interleaved_u16(const uint16_t *buffer, uint32_t total_c
 {
     const uint32_t samples_per_ch = total_count / 2U;
 
-    if (!is_calibrated) {
-        uint32_t sumL = 0U, sumR = 0U;
-        for (uint32_t i = 0U; i < total_count; i += 2U) {
-            sumL += buffer[i];
-            sumR += buffer[i + 1U];
-        }
-        baseL = sumL / samples_per_ch;
-        baseR = sumR / samples_per_ch;
-        is_calibrated = 1U;
-        return;
-    }
-
     uint32_t max_magL = 0U, max_magR = 0U;
     uint32_t sum_magL = 0U, sum_magR = 0U;
     uint32_t sum_rawL = 0U, sum_rawR = 0U;
@@ -144,8 +129,8 @@ static void mic_process_interleaved_u16(const uint16_t *buffer, uint32_t total_c
     for (uint32_t i = 0U; i < total_count; i += 2U) {
         const uint32_t rawL = buffer[i];
         const uint32_t rawR = buffer[i + 1U];
-        const uint32_t magL = u32_abs_diff(rawL, baseL);
-        const uint32_t magR = u32_abs_diff(rawR, baseR);
+        const uint32_t magL = u32_abs_diff(rawL, MIC_MID_U16);
+        const uint32_t magR = u32_abs_diff(rawR, MIC_MID_U16);
 
         sum_rawL += rawL;
         sum_rawR += rawR;
@@ -261,14 +246,6 @@ void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
 
 char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms)
 {
-    if (!is_calibrated) {
-        gate_sound_dbg = 0U;
-        gate_snr_dbg = 0U;
-        gate_ratio_dbg = 0U;
-        diff_dbg = 0U;
-        return detectLR;
-    }
-
     const uint32_t sigL = lvlL;
     const uint32_t sigR = lvlR;
     const uint32_t sL = snrL_q8;
@@ -302,7 +279,7 @@ char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms)
 
 uint8_t mic_is_calibrated(void)
 {
-    return is_calibrated;
+    return 1U;
 }
 
 void mic_get_debug(mic_debug_t *out)
