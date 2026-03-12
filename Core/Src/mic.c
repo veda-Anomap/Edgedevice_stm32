@@ -16,15 +16,15 @@ extern I2S_HandleTypeDef hi2s2;
 
 /* Direction decision gates */
 #define SOUND_TH       390U
-#define ALPHA_DIV      4U
-#define SWITCH_HOLDOFF 80U
+#define ALPHA_DIV      8U
+#define SWITCH_HOLDOFF 200U
 
 /* Sliding windows and SNR gates */
-#define SIG_WIN          6U
+#define SIG_WIN         12U
 #define NOISE_WIN       64U
 #define SNR_TH_Q8      384U
 #define NOISE_FREEZE_Q8 320U
-#define DIR_RATIO_TH_Q8 333U
+#define DIR_RATIO_TH_Q8 384U
 
 /* Shared states updated in ISR context */
 static volatile uint32_t baseL = 0U, baseR = 0U;

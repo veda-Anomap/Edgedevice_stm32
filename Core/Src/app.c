@@ -445,7 +445,7 @@ void app_sensor_loop(void)
     pcf8591_process(nowm);
 
     static uint32_t last_dbg = 0U;
-    if (nowm - last_dbg >= 200U) {
+    if (nowm - last_dbg >= 500U) {
         if (current_mode == MODE_AUTO) {
             mic_debug_t dbg = {0};
             aht10_data_t th;
