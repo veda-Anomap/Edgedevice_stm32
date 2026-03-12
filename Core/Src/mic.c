@@ -8,7 +8,8 @@ static uint16_t adc_buffer[ADC_BUF_LEN];
 
 #ifdef HAL_I2S_MODULE_ENABLED
 /* INMP441 DMA input: 16-bit halfword stream from I2S peripheral */
-#define I2S_DMA_HALFWORD_LEN 400U
+#define I2S_DMA_WORD_LEN     200U
+#define I2S_DMA_HALFWORD_LEN (I2S_DMA_WORD_LEN * 2U)
 static uint16_t i2s_buffer[I2S_DMA_HALFWORD_LEN];
 extern I2S_HandleTypeDef hi2s2;
 #endif
@@ -203,7 +204,7 @@ void mic_init(void)
     mic_reset_state();
 
 #ifdef HAL_I2S_MODULE_ENABLED
-    (void)HAL_I2S_Receive_DMA(&hi2s2, i2s_buffer, I2S_DMA_HALFWORD_LEN);
+    (void)HAL_I2S_Receive_DMA(&hi2s2, i2s_buffer, I2S_DMA_WORD_LEN);
 #else
     /* I2S disabled: no input start */
 #endif
