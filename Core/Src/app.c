@@ -390,6 +390,13 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     mic_on_dma_complete(hadc);
 }
 
+#ifdef HAL_I2S_MODULE_ENABLED
+void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+    mic_on_i2s_rx_complete(hi2s);
+}
+#endif
+
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart2) {

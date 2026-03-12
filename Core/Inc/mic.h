@@ -24,6 +24,9 @@ typedef struct {
 
 void mic_init(ADC_HandleTypeDef *hadc);
 void mic_on_dma_complete(ADC_HandleTypeDef *hadc);
+#ifdef HAL_I2S_MODULE_ENABLED
+void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s);
+#endif
 char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms);
 uint8_t mic_is_calibrated(void);
 void mic_get_debug(mic_debug_t *out);

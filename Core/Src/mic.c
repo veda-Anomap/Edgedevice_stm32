@@ -1,25 +1,28 @@
 #include "mic.h"
 
-/* DMA 버퍼는 [L, R, L, R, ...] 형태로 채워짐 */
+/* Interleaved frame: [L, R, L, R, ...] */
 #define ADC_BUF_LEN 200U
 static uint16_t adc_buffer[ADC_BUF_LEN];
 
-/* 방향 판단 전 기본 게이트 */
-#define SOUND_TH       390U /* 유효 소리로 볼 최소 신호 크기 */
-#define ALPHA_DIV      4U   /* IIR 평활 계수: 클수록 더 부드럽고 느림 */
-#define SWITCH_HOLDOFF 80U  /* 방향 토글 최소 간격(ms) */
+#ifdef HAL_I2S_MODULE_ENABLED
+/* I2S PCM interleaved input buffer (16-bit samples) */
+static int16_t i2s_buffer[ADC_BUF_LEN];
+extern I2S_HandleTypeDef hi2s2;
+#endif
 
-/* 슬라이딩 윈도우 / SNR 게이트 */
-#define SIG_WIN          6U   /* 최근 신호 추적용 짧은 창 */
-#define NOISE_WIN       64U   /* 주변 소음 추적용 긴 창 */
-#define SNR_TH_Q8      384U   /* 절대 SNR 임계값: 1.50배(Q8) */
-#define NOISE_FREEZE_Q8 320U  /* 프레임 SNR이 1.25배 이상이면 노이즈 업데이트 중지 */
-#define DIR_RATIO_TH_Q8 333U  /* 승자/패자 SNR 비율 최소 1.30배(Q8) */
+/* Direction decision gates */
+#define SOUND_TH       390U
+#define ALPHA_DIV      4U
+#define SWITCH_HOLDOFF 80U
 
-/*
- * DMA ISR와 메인 루프가 공유하는 상태값.
- * 비동기 갱신되므로 volatile 필수.
- */
+/* Sliding windows and SNR gates */
+#define SIG_WIN          6U
+#define NOISE_WIN       64U
+#define SNR_TH_Q8      384U
+#define NOISE_FREEZE_Q8 320U
+#define DIR_RATIO_TH_Q8 333U
+
+/* Shared states updated in ISR context */
 static volatile uint32_t baseL = 0U, baseR = 0U;
 static volatile uint32_t lvlL = 0U, lvlR = 0U;
 static volatile uint8_t is_calibrated = 0U;
@@ -29,7 +32,7 @@ static volatile uint32_t noiseL = 1U, noiseR = 1U;
 static volatile uint32_t snrL_q8 = 0U, snrR_q8 = 0U;
 static volatile uint8_t noise_ready = 0U;
 
-/* 방향 결정 관련 상태 */
+/* Direction state */
 static char detectLR = '-';
 static uint32_t last_switch_ms = 0U;
 static volatile uint8_t gate_sound_dbg = 0U;
@@ -37,10 +40,7 @@ static volatile uint8_t gate_snr_dbg = 0U;
 static volatile uint8_t gate_ratio_dbg = 0U;
 static volatile uint32_t diff_dbg = 0U;
 
-/*
- * 링버퍼 저장소 + 누적합.
- * 프레임마다 전체 합을 다시 구하지 않고 O(1) 이동평균 갱신.
- */
+/* Ring buffers for O(1) moving average updates */
 static uint16_t sig_histL[SIG_WIN];
 static uint16_t sig_histR[SIG_WIN];
 static uint16_t noise_histL[NOISE_WIN];
@@ -50,23 +50,17 @@ static uint16_t noise_idx = 0U, noise_count = 0U;
 static uint32_t sig_sumL = 0U, sig_sumR = 0U;
 static uint32_t noise_sumL = 0U, noise_sumR = 0U;
 
-/* unsigned 절대 차이 유틸 */
 static inline uint32_t u32_abs_diff(uint32_t a, uint32_t b)
 {
     return (a > b) ? (a - b) : (b - a);
 }
 
-/* 비율 계산 유틸: (num / den)을 Q8 형식으로 반환 */
 static inline uint32_t q8_ratio(uint32_t num, uint32_t den)
 {
     if (den == 0U) den = 1U;
     return (num << 8) / den;
 }
 
-/*
- * 좌/우 샘플 한 쌍을 링버퍼에 푸시.
- * 버퍼가 가득 찬 경우 가장 오래된 값을 먼저 누적합에서 제거.
- */
 static inline void ring_push_pair(uint16_t *histL,
                                   uint16_t *histR,
                                   uint16_t len,
@@ -91,7 +85,7 @@ static inline void ring_push_pair(uint16_t *histL,
     *idx = (uint16_t)((*idx + 1U) % len);
 }
 
-void mic_init(ADC_HandleTypeDef *hadc)
+static void mic_reset_state(void)
 {
     detectLR = '-';
     last_switch_ms = HAL_GetTick();
@@ -121,22 +115,17 @@ void mic_init(ADC_HandleTypeDef *hadc)
         noise_histL[i] = 0U;
         noise_histR[i] = 0U;
     }
-
-    HAL_ADC_Start_DMA(hadc, (uint32_t *)adc_buffer, ADC_BUF_LEN);
 }
 
-void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
+static void mic_process_interleaved_u16(const uint16_t *buffer, uint32_t total_count)
 {
-    if (hadc->Instance != ADC1) return;
-
-    const uint32_t samples_per_ch = ADC_BUF_LEN / 2U;
+    const uint32_t samples_per_ch = total_count / 2U;
 
     if (!is_calibrated) {
-        /* 첫 프레임은 기준선 추정에만 사용 */
         uint32_t sumL = 0U, sumR = 0U;
-        for (uint32_t i = 0U; i < ADC_BUF_LEN; i += 2U) {
-            sumL += adc_buffer[i];
-            sumR += adc_buffer[i + 1U];
+        for (uint32_t i = 0U; i < total_count; i += 2U) {
+            sumL += buffer[i];
+            sumR += buffer[i + 1U];
         }
         baseL = sumL / samples_per_ch;
         baseR = sumR / samples_per_ch;
@@ -144,15 +133,13 @@ void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
         return;
     }
 
-    /* 프레임 누적 변수 */
     uint32_t max_magL = 0U, max_magR = 0U;
     uint32_t sum_magL = 0U, sum_magR = 0U;
     uint32_t sum_rawL = 0U, sum_rawR = 0U;
 
-    for (uint32_t i = 0U; i < ADC_BUF_LEN; i += 2U) {
-        const uint32_t rawL = adc_buffer[i];
-        const uint32_t rawR = adc_buffer[i + 1U];
-        /* 기준선 대비 편차 크기: |raw - base| */
+    for (uint32_t i = 0U; i < total_count; i += 2U) {
+        const uint32_t rawL = buffer[i];
+        const uint32_t rawR = buffer[i + 1U];
         const uint32_t magL = u32_abs_diff(rawL, baseL);
         const uint32_t magR = u32_abs_diff(rawR, baseR);
 
@@ -168,11 +155,9 @@ void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
     const uint32_t frame_magL = sum_magL / samples_per_ch;
     const uint32_t frame_magR = sum_magR / samples_per_ch;
 
-    /* UART 디버그용 raw ADC 프레임 평균 */
     adcAvgL = sum_rawL / samples_per_ch;
     adcAvgR = sum_rawR / samples_per_ch;
 
-    /* 짧은 창: 현재 신호를 빠르게 반영 */
     ring_push_pair(sig_histL, sig_histR, SIG_WIN,
                    &sig_idx, &sig_count, &sig_sumL, &sig_sumR,
                    (uint16_t)frame_magL, (uint16_t)frame_magR);
@@ -180,7 +165,6 @@ void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
     const uint32_t sig_avgL = (sig_count > 0U) ? (sig_sumL / sig_count) : 0U;
     const uint32_t sig_avgR = (sig_count > 0U) ? (sig_sumR / sig_count) : 0U;
 
-    /* 이번 프레임으로 노이즈 바닥을 갱신할지 결정 */
     uint8_t freeze_noise = 0U;
     if (noise_count > 0U) {
         const uint32_t cur_noiseL = noise_sumL / noise_count;
@@ -192,10 +176,6 @@ void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
         }
     }
 
-    /*
-     * 긴 창: 주변 소음을 천천히 추적.
-     * 초기 워밍업 구간은 빠르게 채우기 위해 강제 업데이트 허용.
-     */
     if (!freeze_noise || noise_count < (NOISE_WIN / 4U)) {
         ring_push_pair(noise_histL, noise_histR, NOISE_WIN,
                        &noise_idx, &noise_count, &noise_sumL, &noise_sumR,
@@ -211,10 +191,50 @@ void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
     peakL = max_magL;
     peakR = max_magR;
 
-    /* 메인 루프 판단 안정화를 위한 신호 평활 */
     lvlL = lvlL + (uint32_t)(((int32_t)sig_avgL - (int32_t)lvlL) / (int32_t)ALPHA_DIV);
     lvlR = lvlR + (uint32_t)(((int32_t)sig_avgR - (int32_t)lvlR) / (int32_t)ALPHA_DIV);
 }
+
+void mic_init(ADC_HandleTypeDef *hadc)
+{
+    mic_reset_state();
+
+    /*
+     * 입력 경로 수동 전환:
+     * - I2S 테스트: 아래 I2S 줄 사용
+     * - ADC 복구 테스트: I2S 줄을 주석 처리하고 ADC 줄 주석 해제
+     */
+    //HAL_ADC_Start_DMA(hadc, (uint32_t *)adc_buffer, ADC_BUF_LEN);
+
+#ifdef HAL_I2S_MODULE_ENABLED
+    (void)hadc;
+    (void)HAL_I2S_Receive_DMA(&hi2s2, (uint16_t *)i2s_buffer, ADC_BUF_LEN);
+#else
+    (void)hadc;
+    /* HAL I2S 미활성 시 자동 ADC 폴백하지 않음 */
+    //HAL_ADC_Start_DMA(hadc, (uint32_t *)adc_buffer, ADC_BUF_LEN);
+#endif
+}
+
+void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
+{
+    if (hadc->Instance != ADC1) return;
+    mic_process_interleaved_u16(adc_buffer, ADC_BUF_LEN);
+}
+
+#ifdef HAL_I2S_MODULE_ENABLED
+void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
+{
+    if (hi2s != &hi2s2) return;
+
+    static uint16_t frame_u16[ADC_BUF_LEN];
+    for (uint32_t i = 0U; i < ADC_BUF_LEN; i++) {
+        /* signed PCM(-32768~32767) -> unsigned(0~65535) */
+        frame_u16[i] = (uint16_t)((int32_t)i2s_buffer[i] + 32768);
+    }
+    mic_process_interleaved_u16(frame_u16, ADC_BUF_LEN);
+}
+#endif
 
 char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms)
 {
@@ -226,7 +246,6 @@ char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms)
         return detectLR;
     }
 
-    /* 이번 루프에서 사용할 ISR 값 스냅샷 */
     const uint32_t sigL = lvlL;
     const uint32_t sigR = lvlR;
     const uint32_t sL = snrL_q8;
@@ -235,7 +254,6 @@ char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms)
 
     diff_dbg = u32_abs_diff(sigL, sigR);
 
-    /* 디버그/튜닝용 게이트 상태 */
     const uint8_t gate_sound = ((sigL >= SOUND_TH || sigR >= SOUND_TH) ? 1U : 0U);
     const uint8_t gate_snr = ((sL >= SNR_TH_Q8 || sR >= SNR_TH_Q8) ? 1U : 0U);
     const uint32_t win = (sL > sR) ? sL : sR;
@@ -246,7 +264,6 @@ char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms)
     gate_snr_dbg = gate_snr;
     gate_ratio_dbg = gate_ratio;
 
-    /* 모터 락이 해제된 경우에만 방향 업데이트 */
     if ((int32_t)(now_ms - motor_lock_until_ms) >= 0) {
         if (nReady && gate_sound && gate_snr && gate_ratio) {
             const char newDir = (sL > sR) ? 'L' : 'R';
