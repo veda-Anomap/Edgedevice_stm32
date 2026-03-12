@@ -8,7 +8,6 @@
 #include <string.h>
 #include <ctype.h>
 
-extern ADC_HandleTypeDef hadc1;
 extern TIM_HandleTypeDef htim3;
 extern I2C_HandleTypeDef hi2c1;
 extern UART_HandleTypeDef huart1;
@@ -373,7 +372,7 @@ static void drain_control_queue(void)
 void app_init(void)
 {
     motor_ctrl_init(&htim3);
-    mic_init(&hadc1);
+    mic_init();
     aht10_init(&hi2c1, 2000U);
     pcf8591_init(&hi2c1, 200U);
 
@@ -385,10 +384,12 @@ void app_init(void)
     printf("Starting DMA Audio System...\r\n");
 }
 
+#ifdef HAL_ADC_MODULE_ENABLED
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
     mic_on_dma_complete(hadc);
 }
+#endif
 
 #ifdef HAL_I2S_MODULE_ENABLED
 void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s)
@@ -461,7 +462,7 @@ void app_sensor_loop(void)
             const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
             const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
-            printf("ADC_L:%4lu ADC_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
+            printf("I2S_L:%4lu I2S_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
                    "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu\r\n",
                    (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                    (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,

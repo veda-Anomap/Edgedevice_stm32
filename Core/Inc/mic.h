@@ -22,8 +22,10 @@ typedef struct {
     char detect_dir;
 } mic_debug_t;
 
-void mic_init(ADC_HandleTypeDef *hadc);
+void mic_init(void);
+#ifdef HAL_ADC_MODULE_ENABLED
 void mic_on_dma_complete(ADC_HandleTypeDef *hadc);
+#endif
 #ifdef HAL_I2S_MODULE_ENABLED
 void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s);
 #endif

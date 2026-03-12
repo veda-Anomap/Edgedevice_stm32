@@ -2,11 +2,14 @@
 
 /* Interleaved frame: [L, R, L, R, ...] */
 #define ADC_BUF_LEN 200U
+#ifdef HAL_ADC_MODULE_ENABLED
 static uint16_t adc_buffer[ADC_BUF_LEN];
+#endif
 
 #ifdef HAL_I2S_MODULE_ENABLED
-/* I2S PCM interleaved input buffer (16-bit samples) */
-static int16_t i2s_buffer[ADC_BUF_LEN];
+/* INMP441 DMA input: 16-bit halfword stream from I2S peripheral */
+#define I2S_DMA_HALFWORD_LEN 400U
+static uint16_t i2s_buffer[I2S_DMA_HALFWORD_LEN];
 extern I2S_HandleTypeDef hi2s2;
 #endif
 
@@ -195,44 +198,63 @@ static void mic_process_interleaved_u16(const uint16_t *buffer, uint32_t total_c
     lvlR = lvlR + (uint32_t)(((int32_t)sig_avgR - (int32_t)lvlR) / (int32_t)ALPHA_DIV);
 }
 
-void mic_init(ADC_HandleTypeDef *hadc)
+void mic_init(void)
 {
     mic_reset_state();
 
-    /*
-     * 입력 경로 수동 전환:
-     * - I2S 테스트: 아래 I2S 줄 사용
-     * - ADC 복구 테스트: I2S 줄을 주석 처리하고 ADC 줄 주석 해제
-     */
-    //HAL_ADC_Start_DMA(hadc, (uint32_t *)adc_buffer, ADC_BUF_LEN);
-
 #ifdef HAL_I2S_MODULE_ENABLED
-    (void)hadc;
-    (void)HAL_I2S_Receive_DMA(&hi2s2, (uint16_t *)i2s_buffer, ADC_BUF_LEN);
+    (void)HAL_I2S_Receive_DMA(&hi2s2, i2s_buffer, I2S_DMA_HALFWORD_LEN);
 #else
-    (void)hadc;
-    /* HAL I2S 미활성 시 자동 ADC 폴백하지 않음 */
-    //HAL_ADC_Start_DMA(hadc, (uint32_t *)adc_buffer, ADC_BUF_LEN);
+    /* I2S disabled: no input start */
 #endif
 }
 
+#ifdef HAL_ADC_MODULE_ENABLED
 void mic_on_dma_complete(ADC_HandleTypeDef *hadc)
 {
     if (hadc->Instance != ADC1) return;
     mic_process_interleaved_u16(adc_buffer, ADC_BUF_LEN);
 }
+#endif
 
 #ifdef HAL_I2S_MODULE_ENABLED
+static inline int32_t inmp441_sign_extend24(uint32_t x24)
+{
+    if ((x24 & 0x00800000U) != 0U) {
+        x24 |= 0xFF000000U;
+    }
+    return (int32_t)x24;
+}
+
+static inline int32_t inmp441_unpack_s24(uint16_t hi, uint16_t lo)
+{
+    /* INMP441: 24-bit signed sample packed in MSB side of 32-bit slot */
+    const uint32_t raw32 = ((uint32_t)hi << 16) | (uint32_t)lo;
+    const uint32_t x24 = (raw32 >> 8) & 0x00FFFFFFU;
+    return inmp441_sign_extend24(x24);
+}
+
 void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
 {
     if (hi2s != &hi2s2) return;
 
-    static uint16_t frame_u16[ADC_BUF_LEN];
-    for (uint32_t i = 0U; i < ADC_BUF_LEN; i++) {
-        /* signed PCM(-32768~32767) -> unsigned(0~65535) */
-        frame_u16[i] = (uint16_t)((int32_t)i2s_buffer[i] + 32768);
+    static uint16_t frame_u16[I2S_DMA_HALFWORD_LEN / 2U];
+    uint32_t out = 0U;
+
+    /* halfword stream layout: [L_hi L_lo R_hi R_lo ...] */
+    for (uint32_t i = 0U; (i + 3U) < I2S_DMA_HALFWORD_LEN; i += 4U) {
+        int32_t l16 = inmp441_unpack_s24(i2s_buffer[i], i2s_buffer[i + 1U]) >> 8;
+        int32_t r16 = inmp441_unpack_s24(i2s_buffer[i + 2U], i2s_buffer[i + 3U]) >> 8;
+
+        if (l16 > 32767) l16 = 32767;
+        if (l16 < -32768) l16 = -32768;
+        if (r16 > 32767) r16 = 32767;
+        if (r16 < -32768) r16 = -32768;
+
+        frame_u16[out++] = (uint16_t)(l16 + 32768);
+        frame_u16[out++] = (uint16_t)(r16 + 32768);
     }
-    mic_process_interleaved_u16(frame_u16, ADC_BUF_LEN);
+    mic_process_interleaved_u16(frame_u16, out);
 }
 #endif
 
