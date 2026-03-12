@@ -11,6 +11,8 @@ static uint16_t adc_buffer[ADC_BUF_LEN];
 #define I2S_DMA_WORD_LEN     200U
 #define I2S_DMA_HALFWORD_LEN (I2S_DMA_WORD_LEN * 2U)
 static uint16_t i2s_buffer[I2S_DMA_HALFWORD_LEN];
+static int32_t dc_offset_l = 0;
+static int32_t dc_offset_r = 0;
 extern I2S_HandleTypeDef hi2s2;
 #endif
 
@@ -19,6 +21,8 @@ extern I2S_HandleTypeDef hi2s2;
 #define ALPHA_DIV      8U
 #define SWITCH_HOLDOFF 200U
 #define MIC_MID_U16    32768U
+#define DC_TRACK_SHIFT 9U
+#define NOISE_GATE_TH  40
 
 /* Sliding windows and SNR gates */
 #define SIG_WIN         12U
@@ -116,6 +120,11 @@ static void mic_reset_state(void)
         noise_histL[i] = 0U;
         noise_histR[i] = 0U;
     }
+
+#ifdef HAL_I2S_MODULE_ENABLED
+    dc_offset_l = 0;
+    dc_offset_r = 0;
+#endif
 }
 
 static void mic_process_interleaved_u16(const uint16_t *buffer, uint32_t total_count)
@@ -232,6 +241,16 @@ void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
         int32_t l16 = inmp441_unpack_s24(i2s_buffer[i], i2s_buffer[i + 1U]) >> 8;
         int32_t r16 = inmp441_unpack_s24(i2s_buffer[i + 2U], i2s_buffer[i + 3U]) >> 8;
 
+        /* Slowly track DC bias and remove it from each channel. */
+        dc_offset_l += (l16 - dc_offset_l) >> DC_TRACK_SHIFT;
+        dc_offset_r += (r16 - dc_offset_r) >> DC_TRACK_SHIFT;
+        l16 -= dc_offset_l;
+        r16 -= dc_offset_r;
+
+        /* Gate very small values to suppress white-noise floor jitter. */
+        if (l16 > -NOISE_GATE_TH && l16 < NOISE_GATE_TH) l16 = 0;
+        if (r16 > -NOISE_GATE_TH && r16 < NOISE_GATE_TH) r16 = 0;
+
         if (l16 > 32767) l16 = 32767;
         if (l16 < -32768) l16 = -32768;
         if (r16 > 32767) r16 = 32767;
@@ -303,3 +322,4 @@ void mic_get_debug(mic_debug_t *out)
     out->noise_ready = noise_ready;
     out->detect_dir = detectLR;
 }
+
