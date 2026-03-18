@@ -46,6 +46,25 @@ static uint8_t s_frame_cmd = 0U;
 static uint32_t s_frame_len = 0U;
 static uint8_t s_frame_payload[PROTO_MAX_PAYLOAD];
 
+/* UART1(RPi) 진단 카운터 */
+static volatile uint32_t s_u1_isr_bytes = 0U;
+static volatile uint32_t s_u1_frames = 0U;
+static volatile uint32_t s_u1_queue_drop = 0U;
+static volatile uint32_t s_u1_proto_oversize = 0U;
+static volatile uint32_t s_u1_proto_invalid = 0U;
+static volatile uint32_t s_u1_status_req = 0U;
+static volatile uint32_t s_u1_motor_req = 0U;
+static volatile uint32_t s_u1_ack_ok = 0U;
+static volatile uint32_t s_u1_ack_fail = 0U;
+static volatile uint32_t s_u1_err_total = 0U;
+static volatile uint32_t s_u1_err_ore = 0U;
+static volatile uint32_t s_u1_err_fe = 0U;
+static volatile uint32_t s_u1_err_ne = 0U;
+static volatile uint32_t s_u1_err_pe = 0U;
+static volatile uint32_t s_u1_rearm_fail = 0U;
+static volatile uint32_t s_u1_recover_ok = 0U;
+static volatile uint32_t s_u1_recover_fail = 0U;
+
 /* PWM 범위를 0~180도 각도로 선형 변환 */
 static int32_t pwm_to_deg(uint16_t pwm, uint16_t min_pwm, uint16_t max_pwm)
 {
@@ -172,6 +191,7 @@ static void proto_rx_feed_byte(uint8_t b)
     case PROTO_RX_WAIT_LEN_3:
         s_proto_len |= (uint32_t)b;
         if (s_proto_len > PROTO_MAX_PAYLOAD) {
+            s_u1_proto_oversize++;
             proto_rx_reset();
             break;
         }
@@ -279,23 +299,70 @@ static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t
 {
     if (cmd == 0x05U) {
         if (len == 0U) {
+            s_u1_status_req++;
             proto_send_status_packet();
         } else {
+            s_u1_proto_invalid++;
             proto_uart1_send_packet(0x05U, "");
         }
         return;
     }
 
     if (cmd == 0x04U) {
+        s_u1_motor_req++;
         char cmd_text[16] = {0};
         const char motor_cmd = parse_motor_command(payload, len, cmd_text, sizeof(cmd_text));
         if (motor_cmd != 0) {
             const uint8_t queued = push_control_command((uint8_t)motor_cmd);
+            if (queued != 0U) {
+                s_u1_ack_ok++;
+            } else {
+                s_u1_ack_fail++;
+            }
             proto_send_motor_ack(queued, cmd_text);
         } else {
+            s_u1_proto_invalid++;
+            s_u1_ack_fail++;
             proto_send_motor_ack(0U, "invalid");
         }
         return;
+    }
+
+    s_u1_proto_invalid++;
+}
+
+static void uart1_recover_rx_error(uint32_t err_flags)
+{
+    /* FE/NE/ORE/PE는 SR->DR 읽기 시퀀스로 클리어됨.
+     * HAL 매크로상 __HAL_UART_CLEAR_PEFLAG가 동일 시퀀스를 수행한다.
+     * 에러가 실제로 발생했을 때만 클리어해 수신 스트림 영향 최소화. */
+    if ((err_flags & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_FE |
+                      HAL_UART_ERROR_NE  | HAL_UART_ERROR_PE)) != 0U) {
+        __HAL_UART_CLEAR_PEFLAG(&huart1);
+    }
+    __HAL_UART_CLEAR_IDLEFLAG(&huart1);
+
+    if (HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1) == HAL_OK) {
+        s_u1_recover_ok++;
+        return;
+    }
+
+    s_u1_rearm_fail++;
+
+    /* Busy 상태로 재arm 실패 시 Rx를 중단 후 다시 시작 시도 */
+    (void)HAL_UART_AbortReceive_IT(&huart1);
+
+    if ((err_flags & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_FE |
+                      HAL_UART_ERROR_NE  | HAL_UART_ERROR_PE)) != 0U) {
+        __HAL_UART_CLEAR_PEFLAG(&huart1);
+    }
+    __HAL_UART_CLEAR_IDLEFLAG(&huart1);
+
+    if (HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1) == HAL_OK) {
+        s_u1_recover_ok++;
+    } else {
+        s_u1_rearm_fail++;
+        s_u1_recover_fail++;
     }
 }
 
@@ -308,6 +375,7 @@ void app_on_uart1_byte(uint8_t b)
     proto_rx_feed_byte(b);
 
     while (proto_pop_frame(&frame_cmd, frame_payload, &frame_len) != 0U) {
+        s_u1_frames++;
         process_protocol_frame(frame_cmd, frame_payload, frame_len);
     }
 }
@@ -407,11 +475,35 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 
     if (huart == &huart1) {
+        s_u1_isr_bytes++;
         if (uart_rx_queueHandle != NULL) {
-            (void)osMessageQueuePut(uart_rx_queueHandle, &rx_data_rpi, 0U, 0U);
+            if (osMessageQueuePut(uart_rx_queueHandle, &rx_data_rpi, 0U, 0U) != osOK) {
+                s_u1_queue_drop++;
+            }
         }
-        (void)HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1);
+        if (HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1) != HAL_OK) {
+            s_u1_rearm_fail++;
+        }
         return;
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart1) {
+        const uint32_t e = huart->ErrorCode;
+        s_u1_err_total++;
+        if ((e & HAL_UART_ERROR_ORE) != 0U) s_u1_err_ore++;
+        if ((e & HAL_UART_ERROR_FE) != 0U) s_u1_err_fe++;
+        if ((e & HAL_UART_ERROR_NE) != 0U) s_u1_err_ne++;
+        if ((e & HAL_UART_ERROR_PE) != 0U) s_u1_err_pe++;
+
+        uart1_recover_rx_error(e);
+        return;
+    }
+
+    if (huart == &huart2) {
+        (void)HAL_UART_Receive_IT(&huart2, &rx_data, 1);
     }
 }
 
@@ -446,6 +538,11 @@ void app_sensor_loop(void)
 
     static uint32_t last_dbg = 0U;
     if (nowm - last_dbg >= 500U) {
+        uint32_t u1_q_used = 0U;
+        if (uart_rx_queueHandle != NULL) {
+            u1_q_used = osMessageQueueGetCount(uart_rx_queueHandle);
+        }
+
         if (current_mode == MODE_AUTO) {
             mic_debug_t dbg = {0};
             aht10_data_t th;
@@ -463,19 +560,51 @@ void app_sensor_loop(void)
             const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
             printf("I2S_L:%4lu I2S_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
-                   "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu\r\n",
+                   "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu | "
+                   "U1[Q:%lu IN:%lu FR:%lu DR:%lu ER:%lu O:%lu F:%lu N:%lu P:%lu "
+                   "IV:%lu OV:%lu R:%lu RO:%lu RF:%lu]\r\n",
                    (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                    (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
                    detect_dir,
                    (long)pan_deg, (long)tilt_deg,
                    temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
-                   (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
-                   (unsigned long)light.light_raw);
+                    (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
+                    (unsigned long)light.light_raw,
+                    (unsigned long)u1_q_used,
+                    (unsigned long)s_u1_isr_bytes,
+                    (unsigned long)s_u1_frames,
+                    (unsigned long)s_u1_queue_drop,
+                    (unsigned long)s_u1_err_total,
+                    (unsigned long)s_u1_err_ore,
+                    (unsigned long)s_u1_err_fe,
+                    (unsigned long)s_u1_err_ne,
+                    (unsigned long)s_u1_err_pe,
+                    (unsigned long)s_u1_proto_invalid,
+                    (unsigned long)s_u1_proto_oversize,
+                    (unsigned long)s_u1_rearm_fail,
+                    (unsigned long)s_u1_recover_ok,
+                    (unsigned long)s_u1_recover_fail);
         } else {
             pcf8591_data_t light;
             pcf8591_get_data(&light);
-            printf("MODE:MANUAL | PAN:%3lddeg TILT:%3lddeg | PAN_PWM:%u TILT_PWM:%u | LIGHT:%3lu\r\n",
-                   (long)pan_deg, (long)tilt_deg, pan_pwm, tilt_pwm, (unsigned long)light.light_raw);
+            printf("MODE:MANUAL | PAN:%3lddeg TILT:%3lddeg | PAN_PWM:%u TILT_PWM:%u | LIGHT:%3lu | "
+                   "U1[Q:%lu IN:%lu FR:%lu DR:%lu ER:%lu O:%lu F:%lu N:%lu P:%lu "
+                   "IV:%lu OV:%lu R:%lu RO:%lu RF:%lu]\r\n",
+                   (long)pan_deg, (long)tilt_deg, pan_pwm, tilt_pwm, (unsigned long)light.light_raw,
+                   (unsigned long)u1_q_used,
+                   (unsigned long)s_u1_isr_bytes,
+                   (unsigned long)s_u1_frames,
+                   (unsigned long)s_u1_queue_drop,
+                   (unsigned long)s_u1_err_total,
+                   (unsigned long)s_u1_err_ore,
+                   (unsigned long)s_u1_err_fe,
+                   (unsigned long)s_u1_err_ne,
+                   (unsigned long)s_u1_err_pe,
+                   (unsigned long)s_u1_proto_invalid,
+                   (unsigned long)s_u1_proto_oversize,
+                   (unsigned long)s_u1_rearm_fail,
+                   (unsigned long)s_u1_recover_ok,
+                   (unsigned long)s_u1_recover_fail);
         }
         last_dbg = nowm;
     }

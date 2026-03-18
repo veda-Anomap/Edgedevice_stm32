@@ -1,104 +1,206 @@
 # EdgeDevice STM32 (NUCLEO-F401RE)
 
-STM32F401RE 기반 엣지 디바이스 펌웨어 프로젝트입니다.
+STM32F401RE 기반 엣지 디바이스 펌웨어입니다.  
+현재 프로젝트는 **소리 방향 감지(I2S 마이크)**, **서보 팬/틸트 제어**, **온습도(AHT10)**, **조도(PCF8591)**, **RPi 연동(UART1 바이너리 프레임 + JSON)** 을 통합합니다.
 
-## 1. 현재 구현 범위
-- 듀얼 마이크(ADC + DMA) 기반 좌/우 방향 감지
-- 2축 서보 제어(PAN/TILT, TIM3 CH1/CH2)
-- AHT10 온습도 센서(I2C1)
-- PCF8591 조도 센서(I2C1, CH0)
-- UART1: RPi 연동용 바이너리 프레임 + JSON payload
-- UART2: 터미널 디버그/수동 테스트 명령
-- FreeRTOS(CMSIS-RTOS v2) 기반 태스크 분리
+---
 
-## 2. 최근 변경 사항 (2026-03-10)
-- PCF8591 조도센서 모듈 추가
-  - `Core/Inc/pcf8591.h`
-  - `Core/Src/pcf8591.c`
-- 상태 응답 JSON(`CMD=0x05`)에 `light` 필드 추가
-  - `{"tmp":..,"hum":..,"dir":"..","tilt":..,"light":..}`
-- UART1 모터 명령 JSON 허용 토큰 정리
-  - 허용: `w`, `a`, `s`, `d`, `auto`, `unauto`
-  - 미허용: `manual`, `on`, `off`, `o`, `f` (UART1 JSON 경로)
-- UART2 단문 테스트(`o/f/w/a/s/d`)는 기존 유지
+## 1) 현재 기능 요약
 
-## 3. 핀 매핑
-- `PA6`: `TIM3_CH1` (PAN 서보)
-- `PA7`: `TIM3_CH2` (TILT 서보)
-- `PB8`: `I2C1_SCL` (AHT10 + PCF8591 공용)
-- `PB9`: `I2C1_SDA` (AHT10 + PCF8591 공용)
-- `PA9/PA10`: `USART1` (RPi 프로토콜)
-- `PA2/PA3`: `USART2` (터미널)
-- `PB0/PB1/PB2`: IR LED GPIO 출력
+- I2S 듀얼 채널 오디오 입력(INMP441 2개 가정)
+- 좌/우 방향 감지 + AUTO 추적
+- MANUAL 모드에서 팬/틸트 수동 이동
+- AHT10 온습도 주기 측정 + 이동평균 필터
+- PCF8591 조도(CH0) 주기 측정
+- UART1(RPi) 프로토콜 요청/응답
+- UART2(터미널) 디버그 출력 + 단문 제어
+- FreeRTOS 기반 태스크 분리
 
-## 4. 모듈 구성
-- `Core/Src/mic.c`
-  - DMA 인터리브 샘플(L,R,L,R...) 처리
-  - 신호/노이즈 윈도우 기반 SNR 계산
-  - 임계값 게이트 기반 방향 판정
-- `Core/Src/motor_ctrl.c`
-  - 자동 추적 상태머신
-  - 수동 step 제어(`manual_move_pan`, `manual_move_tilt`)
-- `Core/Src/aht10.c`
-  - 2초 주기 측정, 변환 대기시간 반영
-  - 이동평균 필터 적용
-- `Core/Src/pcf8591.c`
-  - CH0 조도(8-bit 원시값) 주기 샘플링
-  - 더미 바이트 폐기 후 실제 값 사용
-- `Core/Src/app.c`
-  - AUTO/MANUAL 모드 관리
-  - UART1 프로토콜 파싱/응답
-  - 센서 루프/제어 루프 분리
+---
 
-## 5. UART1 프로토콜 (RPi <-> STM)
-프레임 형식:
-- `CMD(1byte) + LEN(4byte, big-endian) + PAYLOAD(JSON bytes)`
+## 2) 하드웨어/핀 매핑 (현재 코드 기준)
 
-### 5.1 상태 요청/응답
+- `PA6` : `TIM3_CH1` (PAN 서보)
+- `PA7` : `TIM3_CH2` (TILT 서보)
+- `PB12` : `I2S2_WS`
+- `PB13` : `I2S2_CK`
+- `PB15` : `I2S2_SD`
+- `PB8` : `I2C1_SCL` (AHT10 + PCF8591 공용)
+- `PB9` : `I2C1_SDA` (AHT10 + PCF8591 공용)
+- `PA9/PA10` : `USART1` (RPi 프로토콜)
+- `PA2/PA3` : `USART2` (터미널)
+- `PB0/PB1/PB2` : IR LED GPIO 출력
+
+---
+
+## 3) 소프트웨어 아키텍처
+
+### 3.1 Task 구성
+
+- `UartRxTask` (AboveNormal)
+  - `uart_rx_queue`에서 UART1 바이트 수신
+  - 프레임 조립/파싱(`app_on_uart1_byte`)
+- `ControlTask` (Normal, 10ms)
+  - `control_queue` 처리
+  - AUTO: `mic_process` + `motor_ctrl_process`
+  - MANUAL: `motor_ctrl_manual_process`
+- `SensorTask` (BelowNormal, 20ms)
+  - `aht10_process`, `pcf8591_process`
+  - 주기 디버그 출력(500ms)
+- `defaultTask`
+  - 현재 실질 동작 없음(유지)
+
+### 3.2 Queue/Mutex
+
+- `uart_rx_queue` : `uint8_t`, depth 256
+- `control_queue` : `uint8_t`, depth 16
+- `uart_tx_mutex` : 생성되어 있으나 현재 송신 경로에 적극 사용하지 않음
+
+---
+
+## 4) 마이크 처리 로직 (mic.c)
+
+### 4.1 입력 및 전처리
+
+- I2S DMA 수신 완료 콜백에서 데이터 처리
+- 24-bit signed 샘플 언팩 후 16-bit 스케일로 축소
+- 채널별 동적 DC 오프셋 추적:
+  - `dc_offset += (sample - dc_offset) >> DC_TRACK_SHIFT`
+- 노이즈 게이트:
+  - `|sample| < NOISE_GATE_TH` 는 0 처리
+
+### 4.2 특징량 추출
+
+- 프레임 평균 진폭(`frame_magL/R`)
+- 단기 신호창(`SIG_WIN`) 평균
+- 장기 노이즈창(`NOISE_WIN`) 평균
+- `SNR(Q8)` 계산
+
+### 4.3 방향 판정
+
+아래 게이트를 모두 통과하면 방향 갱신:
+
+- `SOUND_TH` (절대 신호 세기)
+- `SNR_TH_Q8` (신호 대 잡음비)
+- `DIR_RATIO_TH_Q8` (좌/우 우세 비율)
+- 추가 보호:
+  - `noise_ready` 워밍업 완료
+  - `SWITCH_HOLDOFF` 방향 전환 간격
+  - `motor_lock_until_ms` 락 시간
+
+---
+
+## 5) 모터 제어 로직 (motor_ctrl.c)
+
+### 5.1 AUTO 모드
+
+- 감지 방향(`L/R`)에 따라 PAN 목표 PWM 이동
+- `SERVO_RUN_MS` 동안 구동 후 정지
+- `DIR_COOLDOWN_MS` 동안 재트리거 제한
+- 진행 중 반대 방향은 `pending_dir`로 보류 처리
+
+### 5.2 MANUAL 모드
+
+- `W/A/S/D` 입력 시 step 단위 PWM 이동
+- 이동 후 `MANUAL_PULSE_MS`만 신호 출력하고 PWM 정지
+  - 목적: 무부하 상태에서 서보 발열/소음 감소
+
+---
+
+## 6) 센서 로직
+
+### 6.1 AHT10 (aht10.c)
+
+- 기본 주기 2초 (`period_ms`), 최소 1초 강제
+- 측정 명령 후 변환 대기 80ms
+- BUSY 비트 확인 후 재시도
+- 최근 `N=10` 이동평균으로 최종 온습도 산출
+
+출력 스케일:
+
+- `temperature_c_x100`
+- `humidity_rh_x100`
+
+### 6.2 PCF8591 (pcf8591.c)
+
+- CH0 조도 8-bit 원시값(0~255) 주기 측정
+- 제어 바이트 전송 후 2바이트 수신
+- 첫 바이트(dummy) 폐기, 두 번째 바이트 사용
+
+---
+
+## 7) UART 프로토콜
+
+### 7.1 프레임 형식 (공통)
+
+- `CMD(1byte) + LEN(4byte, big-endian) + PAYLOAD(JSON UTF-8)`
+
+### 7.2 UART1 (RPi) 명령
+
+1. 상태 요청
 - 요청: `CMD=0x05`, `LEN=0`
-- 응답: `CMD=0x05`, `LEN>0`, JSON
-  - 예시: `{"tmp":25.34,"hum":48.12,"dir":"L","tilt":91,"light":123}`
+- 응답: `CMD=0x05`, JSON
+- 응답 예:
+  - `{"tmp":25.34,"hum":48.12,"dir":"L","tilt":91,"light":123}`
 
-필드 설명:
-- `tmp`: 온도(섭씨)
-- `hum`: 습도(%RH)
-- `dir`: 감지 방향(`L`/`R`/`-`)
-- `tilt`: 틸트 각도(도)
-- `light`: 조도 원시값(0~255)
-
-### 5.2 모터 명령/ACK
-- 요청: `CMD=0x04`, `LEN>0`, JSON
-  - 예시: `{"motor":"w"}`, `{"motor":"auto"}`
+2. 모터 명령
+- 요청: `CMD=0x04`, JSON 예:
+  - `{"motor":"w"}`
+  - `{"motor":"auto"}`
+  - `{"motor":"unauto"}`
 - 허용 토큰:
-  - `w/a/s/d`
-  - `auto/unauto`
+  - `w`, `a`, `s`, `d`, `auto`, `unauto`
 - 응답: `CMD=0x04`, ACK JSON
-  - 예시: `{"ok":1,"mode":"manual","cmd":"w"}`
+  - `{"ok":1,"mode":"manual","cmd":"w"}`
 
-## 6. UART2 단문 명령 (터미널)
-- `o`/`O`: AUTO 모드
-- `f`/`F`: MANUAL 모드
-- MANUAL 모드에서:
-  - `w/s`: 틸트 이동
-  - `a/d`: 팬 이동
+토큰 매핑:
 
-## 7. FreeRTOS 태스크 구성
-- `UartRxTask`
-  - UART1 바이트 수신 큐 처리
-  - 프레임 조립/파싱
-- `ControlTask` (`osDelay(10)`)
-  - 모드/마이크/모터 제어
-- `SensorTask` (`osDelay(20)`)
-  - AHT10/PCF8591 주기 처리
-  - 상태 로그 갱신
+- `auto` -> 내부 명령 `'o'` (AUTO)
+- `unauto` -> 내부 명령 `'f'` (MANUAL)
 
-## 8. 로그 출력
-- AUTO 모드:
-  - 마이크 ADC/최종 신호, 방향, PAN/TILT, 온습도, 조도 출력
-- MANUAL 모드:
-  - PAN/TILT 각도와 PWM, 조도 출력
+### 7.3 UART2 (터미널) 단문 명령
 
-## 9. 빌드/운용 참고
-- `.ioc` 재생성 시 USER CODE 영역 외 변경사항은 덮어쓸 수 있습니다.
-- RTOS 환경 지연은 `osDelay` 사용을 권장합니다.
-- I2C 센서 추가 시 주소 충돌과 전압 레벨(3.3V) 호환을 확인하세요.
+- `o/O`: AUTO 모드
+- `f/F`: MANUAL 모드
+- `w/a/s/d`: MANUAL 이동
+  - AUTO 상태에서 들어와도 MANUAL로 전환 후 적용
+
+---
+
+## 8) 디버그 출력
+
+### 8.1 AUTO 출력
+
+- `I2S_L/I2S_R`
+- `FINAL_L/FINAL_R`
+- `DIR`
+- `PAN/TILT`
+- `T/H/LIGHT`
+
+### 8.2 MANUAL 출력
+
+- 모드, PAN/TILT 각도
+- PAN/TILT PWM
+- LIGHT
+
+---
+
+## 9) 빌드/운용 주의사항
+
+- CubeMX 코드 재생성 시 USER CODE 밖 수정 내용은 덮어써질 수 있음
+- HAL 모듈 매크로(`HAL_I2S_MODULE_ENABLED` 등) 상태에 따라 경로가 달라짐
+- I2S는 DMA + ISR 기반이므로 ISR 부하가 커지면 UART 수신 지연이 생길 수 있음
+- 현재 프로젝트는 일부 예외(예: I2S 에러 콜백)에서 자동 복구 로직이 충분하지 않음
+
+---
+
+## 10) 주요 파일
+
+- `Core/Src/app.c` : 모드/프로토콜/루프 통합 제어
+- `Core/Src/mic.c` : I2S 샘플 처리 및 방향 판정
+- `Core/Src/motor_ctrl.c` : AUTO/MANUAL 서보 제어
+- `Core/Src/aht10.c` : 온습도 상태머신 + 필터
+- `Core/Src/pcf8591.c` : 조도 센서 처리
+- `Core/Src/main.c` : 하드웨어 초기화, RTOS Task 생성
+- `irrled.ioc` : 핀/클럭/주변장치 설정 원본
+
