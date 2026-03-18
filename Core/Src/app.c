@@ -14,6 +14,7 @@ extern UART_HandleTypeDef huart1;
 extern UART_HandleTypeDef huart2;
 extern osMessageQueueId_t uart_rx_queueHandle;
 extern osMessageQueueId_t control_queueHandle;
+extern osMutexId_t uart_tx_mutexHandle;
 
 typedef enum {
     MODE_AUTO = 0,
@@ -25,6 +26,9 @@ static uint8_t rx_data = 0U;
 static uint8_t rx_data_rpi = 0U;
 
 #define PROTO_MAX_PAYLOAD 192U
+#define PROTO_FRAME_QUEUE_LEN 8U
+#define PROTO_RX_TIMEOUT_MS 100U
+#define STATUS_REPLY_MIN_INTERVAL_MS 100U
 
 typedef enum {
     PROTO_RX_WAIT_CMD = 0,
@@ -40,11 +44,20 @@ static volatile uint8_t s_proto_cmd = 0U;
 static volatile uint32_t s_proto_len = 0U;
 static volatile uint32_t s_proto_idx = 0U;
 static uint8_t s_proto_rx_buf[PROTO_MAX_PAYLOAD];
+static volatile uint32_t s_proto_last_byte_ms = 0U;
 
-static volatile uint8_t s_frame_ready = 0U;
-static uint8_t s_frame_cmd = 0U;
-static uint32_t s_frame_len = 0U;
-static uint8_t s_frame_payload[PROTO_MAX_PAYLOAD];
+typedef struct {
+    uint8_t cmd;
+    uint32_t len;
+    uint8_t payload[PROTO_MAX_PAYLOAD];
+} proto_frame_t;
+
+static proto_frame_t s_frame_q[PROTO_FRAME_QUEUE_LEN];
+static volatile uint8_t s_frame_q_head = 0U;
+static volatile uint8_t s_frame_q_tail = 0U;
+static volatile uint8_t s_frame_q_count = 0U;
+static volatile uint8_t s_status_reply_pending = 0U;
+static volatile uint32_t s_last_status_reply_ms = 0U;
 
 /* UART1(RPi) 진단 카운터 */
 static volatile uint32_t s_u1_isr_bytes = 0U;
@@ -86,9 +99,20 @@ static void proto_uart1_send_packet(uint8_t cmd, const char *json)
     header[3] = (uint8_t)((len >> 8) & 0xFFU);
     header[4] = (uint8_t)(len & 0xFFU);
 
-    (void)HAL_UART_Transmit(&huart1, header, sizeof(header), 100);
+    uint8_t locked = 0U;
+    if ((uart_tx_mutexHandle != NULL) && (osKernelGetState() == osKernelRunning)) {
+        if (osMutexAcquire(uart_tx_mutexHandle, osWaitForever) == osOK) {
+            locked = 1U;
+        }
+    }
+
+    (void)HAL_UART_Transmit(&huart1, header, sizeof(header), 100U);
     if (len > 0U) {
-        (void)HAL_UART_Transmit(&huart1, (uint8_t *)json, len, 100);
+        (void)HAL_UART_Transmit(&huart1, (uint8_t *)json, len, 100U);
+    }
+
+    if (locked != 0U) {
+        (void)osMutexRelease(uart_tx_mutexHandle);
     }
 }
 
@@ -144,15 +168,23 @@ static void proto_send_motor_ack(uint8_t ok, const char *cmd_text)
 
 static void proto_publish_frame(uint8_t cmd, const uint8_t *payload, uint32_t len)
 {
-    if (s_frame_ready != 0U) return;
     if (len > PROTO_MAX_PAYLOAD) return;
 
-    s_frame_cmd = cmd;
-    s_frame_len = len;
-    if (len > 0U && payload != NULL) {
-        memcpy(s_frame_payload, payload, len);
+    __disable_irq();
+    if (s_frame_q_count < PROTO_FRAME_QUEUE_LEN) {
+        proto_frame_t *slot = &s_frame_q[s_frame_q_head];
+        slot->cmd = cmd;
+        slot->len = len;
+        if ((len > 0U) && (payload != NULL)) {
+            memcpy(slot->payload, payload, len);
+        }
+        s_frame_q_head = (uint8_t)((s_frame_q_head + 1U) % PROTO_FRAME_QUEUE_LEN);
+        s_frame_q_count++;
+    } else {
+        /* 프레임 큐 포화 시 유실 카운트는 invalid에 합산 */
+        s_u1_proto_invalid++;
     }
-    s_frame_ready = 1U;
+    __enable_irq();
 }
 
 static void proto_rx_reset(void)
@@ -161,12 +193,17 @@ static void proto_rx_reset(void)
     s_proto_cmd = 0U;
     s_proto_len = 0U;
     s_proto_idx = 0U;
+    s_proto_last_byte_ms = 0U;
 }
 
 static void proto_rx_feed_byte(uint8_t b)
 {
     switch (s_proto_state) {
     case PROTO_RX_WAIT_CMD:
+        if ((b != 0x04U) && (b != 0x05U)) {
+            s_u1_proto_invalid++;
+            break;
+        }
         s_proto_cmd = b;
         s_proto_len = 0U;
         s_proto_idx = 0U;
@@ -225,13 +262,15 @@ static uint8_t proto_pop_frame(uint8_t *cmd, uint8_t *payload, uint32_t *len)
     uint8_t has_frame = 0U;
 
     __disable_irq();
-    if (s_frame_ready != 0U) {
-        *cmd = s_frame_cmd;
-        *len = s_frame_len;
+    if (s_frame_q_count > 0U) {
+        const proto_frame_t *slot = &s_frame_q[s_frame_q_tail];
+        *cmd = slot->cmd;
+        *len = slot->len;
         if (*len > 0U) {
-            memcpy(payload, s_frame_payload, *len);
+            memcpy(payload, slot->payload, *len);
         }
-        s_frame_ready = 0U;
+        s_frame_q_tail = (uint8_t)((s_frame_q_tail + 1U) % PROTO_FRAME_QUEUE_LEN);
+        s_frame_q_count--;
         has_frame = 1U;
     }
     __enable_irq();
@@ -295,12 +334,18 @@ static uint8_t push_control_command(uint8_t cmd)
     return (osMessageQueuePut(control_queueHandle, &cmd, 0U, 0U) == osOK) ? 1U : 0U;
 }
 
-static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t len)
+static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t len, uint32_t now_ms)
 {
     if (cmd == 0x05U) {
         if (len == 0U) {
             s_u1_status_req++;
-            proto_send_status_packet();
+            if ((now_ms - s_last_status_reply_ms) >= STATUS_REPLY_MIN_INTERVAL_MS) {
+                proto_send_status_packet();
+                s_last_status_reply_ms = now_ms;
+                s_status_reply_pending = 0U;
+            } else {
+                s_status_reply_pending = 1U;
+            }
         } else {
             s_u1_proto_invalid++;
             proto_uart1_send_packet(0x05U, "");
@@ -368,15 +413,26 @@ static void uart1_recover_rx_error(uint32_t err_flags)
 
 void app_on_uart1_byte(uint8_t b)
 {
+    const uint32_t now = HAL_GetTick();
+
+    if ((s_proto_state != PROTO_RX_WAIT_CMD) &&
+        ((now - s_proto_last_byte_ms) > PROTO_RX_TIMEOUT_MS)) {
+        s_u1_proto_invalid++;
+        proto_rx_reset();
+    }
+    s_proto_last_byte_ms = now;
+    proto_rx_feed_byte(b);
+}
+
+static void drain_protocol_queue(uint32_t now_ms)
+{
     uint8_t frame_cmd = 0U;
     uint32_t frame_len = 0U;
     uint8_t frame_payload[PROTO_MAX_PAYLOAD];
 
-    proto_rx_feed_byte(b);
-
     while (proto_pop_frame(&frame_cmd, frame_payload, &frame_len) != 0U) {
         s_u1_frames++;
-        process_protocol_frame(frame_cmd, frame_payload, frame_len);
+        process_protocol_frame(frame_cmd, frame_payload, frame_len, now_ms);
     }
 }
 
@@ -510,6 +566,16 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
+
+    /* UART1 프레임 조립 결과는 ControlTask에서 처리 */
+    drain_protocol_queue(nowm);
+
+    if ((s_status_reply_pending != 0U) &&
+        ((nowm - s_last_status_reply_ms) >= STATUS_REPLY_MIN_INTERVAL_MS)) {
+        proto_send_status_packet();
+        s_last_status_reply_ms = nowm;
+        s_status_reply_pending = 0U;
+    }
 
     /* UART/프로토콜 명령은 ControlTask에서만 반영 */
     drain_control_queue();

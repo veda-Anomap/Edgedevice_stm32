@@ -5,6 +5,47 @@
 
 ---
 
+## [v1.1.3] - 2026-03-18
+### UART1 파서 강건화 + 처리 경로 분리(요청 간헐 실패 완화)
+
+### 수정 전
+- `WAIT_CMD` 상태에서 임의 바이트를 모두 CMD로 수용하여, 동기 깨짐 이후 `IV/OV` 연쇄 증가 가능
+- 프레임 완료 버퍼가 1칸(`s_frame_ready`)이라 버스트 입력 시 유효 프레임 유실 가능
+- UART1 프로토콜 처리/응답 송신이 `UartRxTask` 문맥에서 직접 수행되어 수신 집중 시 제어 반영 지연 가능
+- 상태요청(0x05) 응답에 최소 간격 제한이 없어 재요청 구간에서 응답 체감 폭주 가능
+- `control_queue` 깊이가 16으로, 제어 명령 burst에서 ACK fail 가능성 존재
+
+### 수정 후
+- 파서 CMD 화이트리스트 적용
+  - `WAIT_CMD`에서 `0x04/0x05`만 수용, 나머지는 즉시 폐기(invalid 카운트 증가)
+- 파서 프레임 타임아웃 추가
+  - `PROTO_RX_TIMEOUT_MS(100ms)` 초과 시 현재 프레임 강제 reset
+- 프레임 저장 구조를 단일 슬롯에서 링 큐로 확장
+  - `PROTO_FRAME_QUEUE_LEN=8`
+  - 버스트 구간에서 단기 흡수 가능
+- 처리 경로 분리
+  - `app_on_uart1_byte()`는 바이트 축적만 수행
+  - `drain_protocol_queue()`를 `app_control_loop()`에서 실행
+  - 결과적으로 UART1 응답 송신은 RxTask가 아니라 ControlTask 문맥에서 수행
+- 상태응답 레이트 제한 추가
+  - `STATUS_REPLY_MIN_INTERVAL_MS=100`
+  - 간격 내 중복 요청은 pending으로 병합 후 다음 주기에 1회 응답
+- UART1 송신 mutex 적용
+  - `proto_uart1_send_packet()`에서 `uart_tx_mutex` 사용
+- 제어 큐 확장
+  - `control_queue` 깊이 `16 -> 64`
+
+### 수정 이유
+- “센서 응답 fail/성공 반복”과 “응답 몰림” 현상의 주요 원인인 프레임 경계 불안정/버스트 취약성을 완화
+- 수신 경로(UartRxTask)와 제어/응답 경로(ControlTask)를 분리해 제어 지연을 줄이기 위함
+- 모터 명령 burst 시 queue 부족으로 인한 fail 확률을 낮추기 위함
+
+### 영향 파일
+- `Core/Src/app.c`
+- `Core/Src/main.c`
+
+---
+
 ## [v1.1.2] - 2026-03-18
 ### UART1 진단 로그 해석 기준 추가(운영 분석 반영)
 
