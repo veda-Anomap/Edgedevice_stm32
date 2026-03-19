@@ -35,13 +35,13 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define RPI_WDG_GRACE_MS            60000U
-#define RPI_HEARTBEAT_TIMEOUT_MS    10000U
-#define RPI_RELAY_CUT_MS             3000U
-#define RPI_WDG_POLL_MS                10U
+#define RPI_WDG_GRACE_SEC           60U
+#define RPI_HEARTBEAT_TIMEOUT_MS 10000U
+#define RPI_RELAY_CUT_SEC            3U
+#define RPI_WDG_POLL_MS             10U
 
-#define SYS_MONITOR_PERIOD_MS        1000U
-#define SYS_MONITOR_MISS_MAX            3U
+#define SYS_MONITOR_PERIOD_MS     1000U
+#define SYS_MONITOR_MISS_MAX         3U
 
 /* USER CODE END PD */
 
@@ -55,6 +55,8 @@ I2C_HandleTypeDef hi2c1;
 
 I2S_HandleTypeDef hi2s2;
 DMA_HandleTypeDef hdma_spi2_rx;
+
+IWDG_HandleTypeDef hiwdg;
 
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim11;
@@ -118,8 +120,9 @@ static const osThreadAttr_t SystemMonitorTask_attributes = {
 };
 
 /* RPi heartbeat/relay watchdog shared states */
+static volatile uint32_t rpi_alive_counter = 0U;
 static volatile uint32_t rpi_last_heartbeat_tick = 0U;
-static volatile uint8_t rpi_task_alive_flag = 0U;
+static volatile uint32_t rpi_miss_count = 0U;
 static volatile uint32_t rpi_relay_reset_count = 0U;
 
 /* USER CODE END PV */
@@ -134,6 +137,7 @@ static void MX_USART1_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_TIM11_Init(void);
 static void MX_I2S2_Init(void);
+static void MX_IWDG_Init(void);
 void StartDefaultTask(void *argument);
 void StartUartRxTask(void *argument);
 void StartControlTask(void *argument);
@@ -152,7 +156,7 @@ extern IWDG_HandleTypeDef hiwdg;
 
 int _write(int file, char *ptr, int len)
 {
-    /* UART2 ?∞Î????îÎ≤ÑÍ∑?Ï∂úÎ†• ?ÑÏãú ÎπÑÌôú?±Ìôî */
+    /* UART2 debug print path is currently disabled */
     (void)file;
     (void)ptr;
     return len;
@@ -194,16 +198,17 @@ int main(void)
   MX_I2C1_Init();
   MX_TIM11_Init();
   MX_I2S2_Init();
+  MX_IWDG_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 1500);
   //HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-  /* UART2 Î∂Ä??Î©îÏãúÏßÄ ?ÑÏãú ÎπÑÌôú?±Ìôî */
+  /* UART2 boot message is currently disabled */
   // const char *msg = "BOOT\r\n";
   // HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
   IR_LED_All_On();   // PB0, PB1, PB2 ON
   //IR_LED_All_Off(); // PB0, PB1, PB2 OFF
-  // HAL_ADC_Start(&hadc1); Êπ≤Í≥ó????†ÏéàÏª??†Ïéå?ùÂç†?adcÂ™õÎ?????†ÏéåÎøÄ??Ë´õ‚ëπ???DMA??ËπÇ¬ÄÂØÉÏ?Îπ????†ÏéÑÍµ?
+  // HAL_ADC_Start(&hadc1); // ADC path disabled (I2S path in use)
 //  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   app_init();
 
@@ -232,7 +237,7 @@ int main(void)
   uart_rx_queueHandle = osMessageQueueNew (256, sizeof(uint8_t), &uart_rx_queue_attributes);
 
   /* creation of control_queue */
-  control_queueHandle = osMessageQueueNew (64, sizeof(uint8_t), &control_queue_attributes);
+  control_queueHandle = osMessageQueueNew (16, sizeof(uint8_t), &control_queue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -292,9 +297,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_LSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
   RCC_OscInitStruct.PLL.PLLM = 16;
@@ -386,6 +392,34 @@ static void MX_I2S2_Init(void)
   /* USER CODE BEGIN I2S2_Init 2 */
 
   /* USER CODE END I2S2_Init 2 */
+
+}
+
+/**
+  * @brief IWDG Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_IWDG_Init(void)
+{
+
+  /* USER CODE BEGIN IWDG_Init 0 */
+
+  /* USER CODE END IWDG_Init 0 */
+
+  /* USER CODE BEGIN IWDG_Init 1 */
+
+  /* USER CODE END IWDG_Init 1 */
+  hiwdg.Instance = IWDG;
+  hiwdg.Init.Prescaler = IWDG_PRESCALER_256;
+  hiwdg.Init.Reload = 625;
+  if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN IWDG_Init 2 */
+
+  /* USER CODE END IWDG_Init 2 */
 
 }
 
@@ -646,34 +680,31 @@ void StartSystemMonitorTask(void *argument)
 {
   (void)argument;
 
-  uint32_t missed_alive_count = 0U;
+  /* Initial snapshot prevents startup order jitter from counting as a miss */
+  uint32_t last_seen_counter = rpi_alive_counter;
 
   for(;;)
   {
     osDelay(SYS_MONITOR_PERIOD_MS);
 
-    if (rpi_task_alive_flag == 1U) {
-      /* RPi watchdog task reported alive in this period */
-      rpi_task_alive_flag = 0U;
-      missed_alive_count = 0U;
+    if (rpi_alive_counter != last_seen_counter) {
+      last_seen_counter = rpi_alive_counter;
+      rpi_miss_count = 0U;
 
 #ifdef HAL_IWDG_MODULE_ENABLED
-      /* Refresh IWDG only when monitored task is alive */
       (void)HAL_IWDG_Refresh(&hiwdg);
 #endif
     } else {
-      /* No alive update during this period */
-      if (missed_alive_count < 0xFFFFFFFFU) {
-        missed_alive_count++;
+      if (rpi_miss_count < 0xFFFFFFFFU) {
+        rpi_miss_count++;
       }
 
-      if (missed_alive_count < SYS_MONITOR_MISS_MAX) {
+      if (rpi_miss_count < SYS_MONITOR_MISS_MAX) {
 #ifdef HAL_IWDG_MODULE_ENABLED
-        /* Keep refreshing for short missed windows */
         (void)HAL_IWDG_Refresh(&hiwdg);
 #endif
       } else {
-        /* Intentionally stop IWDG refresh -> force STM32 reset */
+        /* Intentionally stop IWDG refresh to force hardware reset */
       }
     }
   }
@@ -692,11 +723,12 @@ void StartDefaultTask(void *argument)
   /* USER CODE BEGIN 5 */
   (void)argument;
 
-  /* Keep relay output OFF(LOW) by default */
   HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET);
 
-  /* Grace period for RPi boot */
-  osDelay(RPI_WDG_GRACE_MS);
+  for (uint32_t i = 0U; i < RPI_WDG_GRACE_SEC; i++) {
+    rpi_alive_counter++;
+    osDelay(1000U);
+  }
 
   GPIO_PinState last_level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
   rpi_last_heartbeat_tick = osKernelGetTickCount();
@@ -706,24 +738,29 @@ void StartDefaultTask(void *argument)
     const uint32_t now = osKernelGetTickCount();
     const GPIO_PinState cur_level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
 
-    /* Heartbeat edge detected -> update alive flag and timestamp */
+    rpi_alive_counter++;
+
     if (cur_level != last_level) {
       last_level = cur_level;
       rpi_last_heartbeat_tick = now;
-      rpi_task_alive_flag = 1U;
     }
 
-    /* No heartbeat change for timeout window -> consider RPi down */
     if ((now - rpi_last_heartbeat_tick) > RPI_HEARTBEAT_TIMEOUT_MS) {
-      HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_SET);   /* power cut */
-      osDelay(RPI_RELAY_CUT_MS);                                            /* discharge wait */
-      HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET); /* power restore */
+      HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_SET);
 
+      for (uint32_t i = 0U; i < RPI_RELAY_CUT_SEC; i++) {
+        rpi_alive_counter++;
+        osDelay(1000U);
+      }
+
+      HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET);
       rpi_relay_reset_count++;
-      rpi_task_alive_flag = 0U;
 
-      /* Re-apply grace period after power cycle */
-      osDelay(RPI_WDG_GRACE_MS);
+      for (uint32_t i = 0U; i < RPI_WDG_GRACE_SEC; i++) {
+        rpi_alive_counter++;
+        osDelay(1000U);
+      }
+
       last_level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
       rpi_last_heartbeat_tick = osKernelGetTickCount();
     }
@@ -845,5 +882,3 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
-
-

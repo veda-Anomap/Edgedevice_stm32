@@ -62,7 +62,7 @@ static volatile uint8_t s_frame_q_count = 0U;
 static volatile uint8_t s_status_reply_pending = 0U;
 static volatile uint32_t s_last_status_reply_ms = 0U;
 
-/* UART1(RPi) 진단 카운터 */
+/* UART1 (RPi) diagnostic counters */
 static volatile uint32_t s_u1_isr_bytes = 0U;
 static volatile uint32_t s_u1_frames = 0U;
 static volatile uint32_t s_u1_queue_drop = 0U;
@@ -81,7 +81,7 @@ static volatile uint32_t s_u1_rearm_fail = 0U;
 static volatile uint32_t s_u1_recover_ok = 0U;
 static volatile uint32_t s_u1_recover_fail = 0U;
 
-/* Burst로 몰린 수동 이동 명령은 최신 1개로 합치고 텀을 두고 적용 */
+/* Coalesce manual move bursts: keep only the latest movement command */
 static uint8_t s_pending_move_cmd = 0U;
 static uint32_t s_last_move_apply_ms = 0U;
 
@@ -121,7 +121,7 @@ static void uart2_mirror_uart1_frame(uint8_t cmd, const uint8_t *payload, uint32
 #endif
 }
 
-/* PWM 범위를 0~180도 각도로 선형 변환 */
+/* Convert PWM range to 0~180 degree scale */
 static int32_t pwm_to_deg(uint16_t pwm, uint16_t min_pwm, uint16_t max_pwm)
 {
     if (max_pwm <= min_pwm) return 0;
@@ -224,7 +224,7 @@ static void proto_publish_frame(uint8_t cmd, const uint8_t *payload, uint32_t le
         s_frame_q_head = (uint8_t)((s_frame_q_head + 1U) % PROTO_FRAME_QUEUE_LEN);
         s_frame_q_count++;
     } else {
-        /* 프레임 큐 포화 시 유실 카운트는 invalid에 합산 */
+        /* Queue full: count dropped frame as invalid for diagnostics */
         s_u1_proto_invalid++;
     }
     __enable_irq();
@@ -421,9 +421,8 @@ static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t
 
 static void uart1_recover_rx_error(uint32_t err_flags)
 {
-    /* FE/NE/ORE/PE는 SR->DR 읽기 시퀀스로 클리어됨.
-     * HAL 매크로상 __HAL_UART_CLEAR_PEFLAG가 동일 시퀀스를 수행한다.
-     * 에러가 실제로 발생했을 때만 클리어해 수신 스트림 영향 최소화. */
+    /* FE/NE/ORE/PE 발생 시 HAL 클리어 매크로는 내부적으로 SR->DR 읽기 시퀀스를 수행한다.
+     * 실제 에러가 발생한 경우에만 클리어를 실행해 RX 스트림 영향(바이트 유실)을 최소화한다. */
     if ((err_flags & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_FE |
                       HAL_UART_ERROR_NE  | HAL_UART_ERROR_PE)) != 0U) {
         __HAL_UART_CLEAR_PEFLAG(&huart1);
@@ -437,7 +436,7 @@ static void uart1_recover_rx_error(uint32_t err_flags)
 
     s_u1_rearm_fail++;
 
-    /* Busy 상태로 재arm 실패 시 Rx를 중단 후 다시 시작 시도 */
+    /* If rearm fails in busy state, abort receive and rearm once again */
     (void)HAL_UART_AbortReceive_IT(&huart1);
 
     if ((err_flags & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_FE |
@@ -547,19 +546,19 @@ static void drain_control_queue(uint32_t now_ms)
     uint8_t cmd = 0U;
     while (osMessageQueueGet(control_queueHandle, &cmd, NULL, 0U) == osOK) {
         if (is_mode_command(cmd) != 0U) {
-            /* 모드 전환은 즉시 처리 */
+            /* Apply mode switch immediately */
             s_pending_move_cmd = 0U;
             apply_control_command(cmd);
             continue;
         }
 
         if (is_move_command(cmd) != 0U) {
-            /* 이동 burst는 최신 1개만 남겨 coalesce */
+            /* For move bursts, keep only the latest command (coalescing) */
             s_pending_move_cmd = cmd;
             continue;
         }
 
-        /* 향후 확장 명령 대비: 이동/모드 외 명령은 즉시 처리 */
+        /* Future extension commands are applied immediately */
         apply_control_command(cmd);
     }
 
@@ -645,7 +644,7 @@ void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
 
-    /* UART1 프레임 조립 결과는 ControlTask에서 처리 */
+    /* Process completed UART1 frames in ControlTask context */
     drain_protocol_queue(nowm);
 
     if ((s_status_reply_pending != 0U) &&
@@ -655,7 +654,7 @@ void app_control_loop(void)
         s_status_reply_pending = 0U;
     }
 
-    /* UART/프로토콜 명령은 ControlTask에서만 반영 */
+    /* Apply UART/protocol commands only in ControlTask */
     drain_control_queue(nowm);
 
     if (current_mode == MODE_AUTO) {

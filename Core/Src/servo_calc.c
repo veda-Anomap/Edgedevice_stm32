@@ -5,7 +5,7 @@
 extern TIM_HandleTypeDef htim3;
 extern UART_HandleTypeDef huart2;
 
-// printf 리다이렉트가 이미 있으면 생략 가능
+// Skip if printf redirection is already defined elsewhere
 //int _write(int file, char *ptr, int len)
 //{
 //    HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, 100);
@@ -18,7 +18,7 @@ static void servo_set_us(uint16_t us)
     __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, us);
 }
 
-/* RTOS 동작 중에는 osDelay 사용, 커널 시작 전에는 HAL_Delay 사용 */
+/* Use osDelay when RTOS is running, HAL_Delay before scheduler start */
 static void delay_ms(uint32_t ms)
 {
     if (osKernelGetState() == osKernelRunning) {
@@ -29,15 +29,15 @@ static void delay_ms(uint32_t ms)
 }
 
 /**
- * 센터 탐색: 1450~1550을 step 간격으로 출력하고 2초 유지
- * 너는 그때 서보가 "가만히/덜덜/천천히 도는지" 보고 센터 후보를 고름.
+ * Center sweep: output 1450~1550 with step interval and hold 2 seconds each.
+ * Observe where servo is most stable and choose that as center trim value.
  */
 void ServoCal_Run(void)
 {
     const uint16_t start = 1490;
     const uint16_t end   = 1520;
-    const uint16_t step  = 10;      // 5us 단위(필요시 10us로)
-    const uint32_t hold_ms = 2000; // 2초 유지
+    const uint16_t step  = 10;      // test step (us)
+    const uint32_t hold_ms = 2000;  // hold time per step
 
     printf("\r\n[ServoCal] start\r\n");
     printf("Watch servo. Find value where it stays still / most stable.\r\n");
@@ -49,7 +49,7 @@ void ServoCal_Run(void)
         delay_ms(hold_ms);
     }
 
-    // 끝나면 1500으로 돌려놓기(원하면 제거 가능)
+    // Return to 1500 at end (remove if not needed)
     servo_set_us(1500);
     printf("[ServoCal] done\r\n");
 }
