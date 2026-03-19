@@ -4,14 +4,14 @@
 #include <stdint.h>
 
 /* 팬(좌우) PWM 범위 */
-#define PAN_LEFT    1200U
-#define PAN_RIGHT   1820U
-#define PAN_CENTER  1520U
+#define PAN_LEFT    1210U
+#define PAN_RIGHT   1810U
+#define PAN_CENTER  1510U
 
 /* 틸트(상하) PWM 범위 */
-#define TILT_UP     1200U
-#define TILT_DOWN   1800U
-#define TILT_CENTER 1500U
+#define TILT_UP     1210U
+#define TILT_DOWN   1810U
+#define TILT_CENTER 1510U
 
 void motor_ctrl_init(TIM_HandleTypeDef *htim);
 void motor_ctrl_process(uint32_t now_ms, char detect_dir);

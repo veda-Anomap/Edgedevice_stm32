@@ -29,6 +29,7 @@ static uint8_t rx_data_rpi = 0U;
 #define PROTO_FRAME_QUEUE_LEN 8U
 #define PROTO_RX_TIMEOUT_MS 100U
 #define STATUS_REPLY_MIN_INTERVAL_MS 100U
+#define MANUAL_CMD_MIN_INTERVAL_MS 90U
 #define UART1_RX_MIRROR_TO_UART2 1U
 #define UART1_MIRROR_PAYLOAD_MAX 96U
 
@@ -79,6 +80,10 @@ static volatile uint32_t s_u1_err_pe = 0U;
 static volatile uint32_t s_u1_rearm_fail = 0U;
 static volatile uint32_t s_u1_recover_ok = 0U;
 static volatile uint32_t s_u1_recover_fail = 0U;
+
+/* Burst로 몰린 수동 이동 명령은 최신 1개로 합치고 텀을 두고 적용 */
+static uint8_t s_pending_move_cmd = 0U;
+static uint32_t s_last_move_apply_ms = 0U;
 
 static void uart2_mirror_uart1_frame(uint8_t cmd, const uint8_t *payload, uint32_t len)
 {
@@ -522,13 +527,47 @@ static void apply_control_command(uint8_t cmd)
     }
 }
 
-static void drain_control_queue(void)
+static uint8_t is_move_command(uint8_t cmd)
+{
+    return (cmd == 'W' || cmd == 'w' ||
+            cmd == 'A' || cmd == 'a' ||
+            cmd == 'S' || cmd == 's' ||
+            cmd == 'D' || cmd == 'd') ? 1U : 0U;
+}
+
+static uint8_t is_mode_command(uint8_t cmd)
+{
+    return (cmd == 'O' || cmd == 'o' || cmd == 'F' || cmd == 'f') ? 1U : 0U;
+}
+
+static void drain_control_queue(uint32_t now_ms)
 {
     if (control_queueHandle == NULL) return;
 
     uint8_t cmd = 0U;
     while (osMessageQueueGet(control_queueHandle, &cmd, NULL, 0U) == osOK) {
+        if (is_mode_command(cmd) != 0U) {
+            /* 모드 전환은 즉시 처리 */
+            s_pending_move_cmd = 0U;
+            apply_control_command(cmd);
+            continue;
+        }
+
+        if (is_move_command(cmd) != 0U) {
+            /* 이동 burst는 최신 1개만 남겨 coalesce */
+            s_pending_move_cmd = cmd;
+            continue;
+        }
+
+        /* 향후 확장 명령 대비: 이동/모드 외 명령은 즉시 처리 */
         apply_control_command(cmd);
+    }
+
+    if ((s_pending_move_cmd != 0U) &&
+        ((now_ms - s_last_move_apply_ms) >= MANUAL_CMD_MIN_INTERVAL_MS)) {
+        apply_control_command(s_pending_move_cmd);
+        s_last_move_apply_ms = now_ms;
+        s_pending_move_cmd = 0U;
     }
 }
 
@@ -617,7 +656,7 @@ void app_control_loop(void)
     }
 
     /* UART/프로토콜 명령은 ControlTask에서만 반영 */
-    drain_control_queue();
+    drain_control_queue(nowm);
 
     if (current_mode == MODE_AUTO) {
         if (mic_is_calibrated()) {

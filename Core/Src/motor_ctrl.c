@@ -3,8 +3,6 @@
 /* Auto tracking behavior */
 #define SERVO_RUN_MS      200U
 #define DIR_COOLDOWN_MS  1500U
-/* Manual mode: send PWM briefly then release to reduce idle noise/heat */
-#define MANUAL_PULSE_MS   120U
 
 static TIM_HandleTypeDef *s_htim = NULL;
 
@@ -18,10 +16,6 @@ static char last_dir = '-';
 static uint8_t motor_running = 0U;
 static uint32_t motor_stop_ms = 0U;
 static char pending_dir = '-';
-static uint8_t manual_pan_active = 0U;
-static uint8_t manual_tilt_active = 0U;
-static uint32_t manual_pan_off_ms = 0U;
-static uint32_t manual_tilt_off_ms = 0U;
 
 static uint16_t clamp_u16(int32_t v, uint16_t min_v, uint16_t max_v)
 {
@@ -59,10 +53,6 @@ void motor_ctrl_init(TIM_HandleTypeDef *htim)
     motor_running = 0U;
     motor_lock_until_ms = 0U;
     motor_stop_ms = 0U;
-    manual_pan_active = 0U;
-    manual_tilt_active = 0U;
-    manual_pan_off_ms = 0U;
-    manual_tilt_off_ms = 0U;
 
     current_pan_pwm = PAN_CENTER;
     current_tilt_pwm = TILT_CENTER;
@@ -81,13 +71,9 @@ void motor_ctrl_enter_manual(void)
     pending_dir = '-';
     motor_running = 0U;
     motor_lock_until_ms = 0U;
-    manual_pan_active = 0U;
-    manual_tilt_active = 0U;
-
-    if (s_htim != NULL) {
-        HAL_TIM_PWM_Stop(s_htim, TIM_CHANNEL_1);
-        HAL_TIM_PWM_Stop(s_htim, TIM_CHANNEL_2);
-    }
+    /* Manual mode: keep PWM output to hold servo position */
+    write_pan(current_pan_pwm);
+    write_tilt(current_tilt_pwm);
 }
 
 void motor_ctrl_enter_auto(void)
@@ -109,8 +95,6 @@ void manual_move_pan(int step)
     const int32_t next = (int32_t)current_pan_pwm + (int32_t)step;
     current_pan_pwm = clamp_u16(next, PAN_LEFT, PAN_RIGHT);
     write_pan(current_pan_pwm);
-    manual_pan_active = 1U;
-    manual_pan_off_ms = HAL_GetTick() + MANUAL_PULSE_MS;
 }
 
 void manual_move_tilt(int step)
@@ -118,8 +102,6 @@ void manual_move_tilt(int step)
     const int32_t next = (int32_t)current_tilt_pwm + (int32_t)step;
     current_tilt_pwm = clamp_u16(next, TILT_UP, TILT_DOWN);
     write_tilt(current_tilt_pwm);
-    manual_tilt_active = 1U;
-    manual_tilt_off_ms = HAL_GetTick() + MANUAL_PULSE_MS;
 }
 
 uint16_t motor_ctrl_get_pan_pwm(void)
@@ -134,17 +116,8 @@ uint16_t motor_ctrl_get_tilt_pwm(void)
 
 void motor_ctrl_manual_process(uint32_t now_ms)
 {
-    if (s_htim == NULL) return;
-
-    if (manual_pan_active && (int32_t)(now_ms - manual_pan_off_ms) >= 0) {
-        HAL_TIM_PWM_Stop(s_htim, TIM_CHANNEL_1);
-        manual_pan_active = 0U;
-    }
-
-    if (manual_tilt_active && (int32_t)(now_ms - manual_tilt_off_ms) >= 0) {
-        HAL_TIM_PWM_Stop(s_htim, TIM_CHANNEL_2);
-        manual_tilt_active = 0U;
-    }
+    (void)now_ms;
+    /* PWM is intentionally kept on in manual mode. */
 }
 
 void motor_ctrl_process(uint32_t now_ms, char detect_dir)
