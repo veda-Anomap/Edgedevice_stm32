@@ -29,6 +29,8 @@ static uint8_t rx_data_rpi = 0U;
 #define PROTO_FRAME_QUEUE_LEN 8U
 #define PROTO_RX_TIMEOUT_MS 100U
 #define STATUS_REPLY_MIN_INTERVAL_MS 100U
+#define UART1_RX_MIRROR_TO_UART2 1U
+#define UART1_MIRROR_PAYLOAD_MAX 96U
 
 typedef enum {
     PROTO_RX_WAIT_CMD = 0,
@@ -77,6 +79,42 @@ static volatile uint32_t s_u1_err_pe = 0U;
 static volatile uint32_t s_u1_rearm_fail = 0U;
 static volatile uint32_t s_u1_recover_ok = 0U;
 static volatile uint32_t s_u1_recover_fail = 0U;
+
+static void uart2_mirror_uart1_frame(uint8_t cmd, const uint8_t *payload, uint32_t len)
+{
+#if UART1_RX_MIRROR_TO_UART2
+    char payload_txt[UART1_MIRROR_PAYLOAD_MAX + 1U];
+    uint32_t copy_len = 0U;
+    const char *tail = "";
+
+    if ((payload != NULL) && (len > 0U)) {
+        copy_len = (len > UART1_MIRROR_PAYLOAD_MAX) ? UART1_MIRROR_PAYLOAD_MAX : len;
+        for (uint32_t i = 0U; i < copy_len; i++) {
+            const uint8_t ch = payload[i];
+            payload_txt[i] = ((ch >= 32U) && (ch <= 126U)) ? (char)ch : '.';
+        }
+        payload_txt[copy_len] = '\0';
+        if (len > copy_len) {
+            tail = "...";
+        }
+    } else {
+        payload_txt[0] = '\0';
+    }
+
+    char line[220];
+    int n = snprintf(line, sizeof(line),
+                     "[U1->STM] CMD:0x%02X LEN:%lu PAYLOAD:%s%s\r\n",
+                     (unsigned)cmd, (unsigned long)len, payload_txt, tail);
+    if (n > 0) {
+        const uint16_t tx_len = (n < (int)sizeof(line)) ? (uint16_t)n : (uint16_t)(sizeof(line) - 1U);
+        (void)HAL_UART_Transmit(&huart2, (uint8_t *)line, tx_len, 50U);
+    }
+#else
+    (void)cmd;
+    (void)payload;
+    (void)len;
+#endif
+}
 
 /* PWM 범위를 0~180도 각도로 선형 변환 */
 static int32_t pwm_to_deg(uint16_t pwm, uint16_t min_pwm, uint16_t max_pwm)
@@ -432,6 +470,7 @@ static void drain_protocol_queue(uint32_t now_ms)
 
     while (proto_pop_frame(&frame_cmd, frame_payload, &frame_len) != 0U) {
         s_u1_frames++;
+        uart2_mirror_uart1_frame(frame_cmd, frame_payload, frame_len);
         process_protocol_frame(frame_cmd, frame_payload, frame_len, now_ms);
     }
 }

@@ -128,7 +128,9 @@ void StartSensorTask(void *argument);
 /* USER CODE BEGIN 0 */
 int _write(int file, char *ptr, int len)
 {
-    HAL_UART_Transmit(&huart2, (uint8_t*)ptr, len, 100);
+    /* UART2 터미널 디버그 출력 임시 비활성화 */
+    (void)file;
+    (void)ptr;
     return len;
 }
 /* USER CODE END 0 */
@@ -172,8 +174,9 @@ int main(void)
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   __HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, 1500);
   //HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-  const char *msg = "BOOT\r\n";
-  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+  /* UART2 부트 메시지 임시 비활성화 */
+  // const char *msg = "BOOT\r\n";
+  // HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
   IR_LED_All_On();   // PB0, PB1, PB2 ON
   //IR_LED_All_Off(); // PB0, PB1, PB2 OFF
   // HAL_ADC_Start(&hadc1); 湲곗〈 ?占쎈컻?占쎌쑝占?adc媛믪쓣 ?占쎌뿀??諛⑹떇??DMA占?蹂寃쏀빐???占쎄굅
