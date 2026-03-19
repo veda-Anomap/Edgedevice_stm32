@@ -41,7 +41,8 @@
 #define RPI_WDG_POLL_MS             10U
 
 #define SYS_MONITOR_PERIOD_MS     1000U
-#define SYS_MONITOR_MISS_MAX         3U
+/* With ~5s IWDG timeout, allow up to 3 missed checks and stop refresh on 4th miss */
+#define SYS_MONITOR_MISS_MAX         4U
 
 /* USER CODE END PD */
 
@@ -676,6 +677,23 @@ static uint16_t Read_ADC_PC0(void)
 }
 #endif
 
+/* Keep watchdog alive counter moving while waiting in second-scale windows. */
+static void rpi_wdg_wait_seconds_and_mark_alive(uint32_t seconds)
+{
+  for (uint32_t i = 0U; i < seconds; i++) {
+    rpi_alive_counter++;
+    osDelay(1000U);
+  }
+}
+
+/* Reset heartbeat base line after grace/recovery window. */
+static GPIO_PinState rpi_wdg_sync_heartbeat_baseline(void)
+{
+  const GPIO_PinState level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
+  rpi_last_heartbeat_tick = osKernelGetTickCount();
+  return level;
+}
+
 void StartSystemMonitorTask(void *argument)
 {
   (void)argument;
@@ -723,15 +741,13 @@ void StartDefaultTask(void *argument)
   /* USER CODE BEGIN 5 */
   (void)argument;
 
+  /* Active-high relay module: keep LOW in normal operation. */
   HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET);
 
-  for (uint32_t i = 0U; i < RPI_WDG_GRACE_SEC; i++) {
-    rpi_alive_counter++;
-    osDelay(1000U);
-  }
+  /* Initial grace period for RPi boot. */
+  rpi_wdg_wait_seconds_and_mark_alive(RPI_WDG_GRACE_SEC);
 
-  GPIO_PinState last_level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
-  rpi_last_heartbeat_tick = osKernelGetTickCount();
+  GPIO_PinState last_level = rpi_wdg_sync_heartbeat_baseline();
 
   for(;;)
   {
@@ -746,23 +762,20 @@ void StartDefaultTask(void *argument)
     }
 
     if ((now - rpi_last_heartbeat_tick) > RPI_HEARTBEAT_TIMEOUT_MS) {
+      /* Cut RPi power via relay to force reboot. */
       HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_SET);
 
-      for (uint32_t i = 0U; i < RPI_RELAY_CUT_SEC; i++) {
-        rpi_alive_counter++;
-        osDelay(1000U);
-      }
+      /* Keep system monitor fed while relay cut is in progress. */
+      rpi_wdg_wait_seconds_and_mark_alive(RPI_RELAY_CUT_SEC);
 
+      /* Restore relay (power back on). */
       HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET);
       rpi_relay_reset_count++;
 
-      for (uint32_t i = 0U; i < RPI_WDG_GRACE_SEC; i++) {
-        rpi_alive_counter++;
-        osDelay(1000U);
-      }
+      /* Wait for RPi reboot grace period after power restore. */
+      rpi_wdg_wait_seconds_and_mark_alive(RPI_WDG_GRACE_SEC);
 
-      last_level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
-      rpi_last_heartbeat_tick = osKernelGetTickCount();
+      last_level = rpi_wdg_sync_heartbeat_baseline();
     }
 
     osDelay(RPI_WDG_POLL_MS);
