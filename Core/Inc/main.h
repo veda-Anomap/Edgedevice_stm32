@@ -61,6 +61,10 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define RPI_HB_Pin GPIO_PIN_3
+#define RPI_HB_GPIO_Port GPIOC
+#define RELAY_EN_Pin GPIO_PIN_10
+#define RELAY_EN_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
 
