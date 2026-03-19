@@ -237,7 +237,7 @@ int main(void)
   uart_rx_queueHandle = osMessageQueueNew (256, sizeof(uint8_t), &uart_rx_queue_attributes);
 
   /* creation of control_queue */
-  control_queueHandle = osMessageQueueNew (16, sizeof(uint8_t), &control_queue_attributes);
+  control_queueHandle = osMessageQueueNew (64, sizeof(uint8_t), &control_queue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
