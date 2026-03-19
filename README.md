@@ -69,6 +69,7 @@ STM32F401RE 기반 엣지 디바이스 펌웨어입니다.
 - 프로토콜 프레임 처리
 - 모드/수동 명령 처리
 - AUTO/MANUAL 모터 제어 루프
+- `control_queue` 길이: 64 (`uint8_t`)
 
 - `SensorTask` (BelowNormal, 20ms)
 - AHT10/PCF8591 주기 처리
@@ -105,10 +106,11 @@ STM32F401RE 기반 엣지 디바이스 펌웨어입니다.
 
 - 외부 watchdog 코드 경로
 - `PC3` 하트비트 감시, 타임아웃 시 `PC10` 릴레이 제어
+- 기본 정책: `10초 timeout -> 3초 relay cut -> 60초 grace`
 
 - 내부 IWDG 경로
-- 코드에는 `HAL_IWDG_MODULE_ENABLED` 가드 기반 로직이 포함됨
-- 실제 동작하려면 `.ioc`에서 IWDG Enable 후 코드 재생성이 필요
+- 현재 `.ioc` 기준 IWDG 활성화 상태
+- 모니터 정책: 1초 주기 alive counter 확인, `miss >= 4`에서 refresh 중단
 
 ---
 
