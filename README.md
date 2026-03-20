@@ -9,6 +9,7 @@ STM32F401RE 기반 엣지 디바이스 펌웨어입니다.
 - 2단계: VAD + 50% 오버랩 프레임 + 코스 lag(confidence) 추정
 - 3단계: 경량 GCC-PHAT + 서브샘플 보간으로 `tau/angle` 정밀화
 - 4단계: confidence 히스테리시스 + hold + EMA/slew로 각도 안정화
+- 5단계: AUTO에서 TDOA 각도 기반 PAN 연속 추종 + `detect_dir` 자동 fallback
 - PAN/TILT 서보 제어 (AUTO/MANUAL)
 - AHT10 온습도 측정 + 이동 평균 필터
 - PCF8591 조도 측정
@@ -126,6 +127,8 @@ STM32F401RE 기반 엣지 디바이스 펌웨어입니다.
 - I2S 경로 사용 중 ADC 보조 경로는 조건부 컴파일로 유지될 수 있음
 - TDOA는 현재 3단계까지 반영되어 `TDOA[V/L/T/A/C]` 로그로 지연/각도 상태 확인 가능
 - TDOA는 현재 4단계까지 반영되어 `valid` 경계 깜빡임과 각도 튐을 완화
+- TDOA는 현재 5단계까지 반영되어 AUTO PAN 제어에 연동됨(`SRC:T` 경로)
+- TDOA 신호 소실 시 짧은 hold 후 기존 `SRC:D`(L/R 기반)로 자동 복귀
 - 칼만 필터/모터 추종 게인 분리는 후속 튜닝 단계
 - 모터 전원은 외부 5V 전원 + GND 공통을 권장
 

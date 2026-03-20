@@ -17,6 +17,7 @@ void motor_ctrl_init(TIM_HandleTypeDef *htim);
 void motor_ctrl_process(uint32_t now_ms, char detect_dir);
 void motor_ctrl_manual_process(uint32_t now_ms);
 uint32_t motor_ctrl_get_lock_until_ms(void);
+void motor_ctrl_track_pan_tdoa(uint32_t now_ms, int32_t angle_deg_x10);
 
 /* Manual mode control API */
 void motor_ctrl_enter_manual(void);

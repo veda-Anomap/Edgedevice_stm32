@@ -30,6 +30,7 @@ static uint8_t rx_data_rpi = 0U;
 #define PROTO_RX_TIMEOUT_MS 100U
 #define STATUS_REPLY_MIN_INTERVAL_MS 100U
 #define MANUAL_CMD_MIN_INTERVAL_MS 90U
+#define TDOA_FALLBACK_HOLD_MS 250U
 #define UART1_RX_MIRROR_TO_UART2 1U
 #define UART1_MIRROR_PAYLOAD_MAX 96U
 
@@ -80,6 +81,7 @@ static volatile uint32_t s_u1_err_pe = 0U;
 static volatile uint32_t s_u1_rearm_fail = 0U;
 static volatile uint32_t s_u1_recover_ok = 0U;
 static volatile uint32_t s_u1_recover_fail = 0U;
+static volatile char s_auto_ctrl_src = 'D'; /* D: detect_dir, T: tdoa */
 
 /* Coalesce manual move bursts: keep only the latest movement command */
 static uint8_t s_pending_move_cmd = 0U;
@@ -645,6 +647,7 @@ void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
     mic_tdoa_process(nowm);
+    static uint32_t last_tdoa_ok_ms = 0U;
 
     /* Process completed UART1 frames in ControlTask context */
     drain_protocol_queue(nowm);
@@ -660,12 +663,26 @@ void app_control_loop(void)
     drain_control_queue(nowm);
 
     if (current_mode == MODE_AUTO) {
-        if (mic_is_calibrated()) {
+        mic_tdoa_debug_t tdbg = {0};
+        mic_get_tdoa_debug(&tdbg);
+
+        if (tdbg.valid != 0U) {
+            last_tdoa_ok_ms = nowm;
+            s_auto_ctrl_src = 'T';
+            motor_ctrl_track_pan_tdoa(nowm, tdbg.alpha_deg_x10);
+        } else if ((nowm - last_tdoa_ok_ms) <= TDOA_FALLBACK_HOLD_MS) {
+            s_auto_ctrl_src = 'T';
+            /* keep last tdoa-tracked position for a short hold window */
+        } else if (mic_is_calibrated()) {
+            s_auto_ctrl_src = 'D';
             const uint32_t lock_until_ms = motor_ctrl_get_lock_until_ms();
             const char detect_dir = mic_process(nowm, lock_until_ms);
             motor_ctrl_process(nowm, detect_dir);
+        } else {
+            s_auto_ctrl_src = '-';
         }
     } else {
+        s_auto_ctrl_src = 'M';
         motor_ctrl_manual_process(nowm);
     }
 }
@@ -707,17 +724,18 @@ void app_sensor_loop(void)
             const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
             printf("I2S_L:%4lu I2S_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
-                   "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu | "
+                   "PAN:%3lddeg TILT:%3lddeg | SRC:%c | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu | "
                    "TDOA[V:%u L:%ld T:%ldus A:%ld.%01lddeg C:%u] | "
                    "U1[Q:%lu IN:%lu FR:%lu DR:%lu ER:%lu O:%lu F:%lu N:%lu P:%lu "
                    "IV:%lu OV:%lu R:%lu RO:%lu RF:%lu]\r\n",
                    (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
-                   (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
-                   detect_dir,
-                   (long)pan_deg, (long)tilt_deg,
-                    temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
-                     (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
-                     (unsigned long)light.light_raw,
+                    (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
+                    detect_dir,
+                    (long)pan_deg, (long)tilt_deg,
+                     s_auto_ctrl_src,
+                     temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
+                      (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
+                      (unsigned long)light.light_raw,
                      (unsigned)tdbg.valid,
                      (long)tdbg.lag_samples,
                      (long)tdbg.tau_us,

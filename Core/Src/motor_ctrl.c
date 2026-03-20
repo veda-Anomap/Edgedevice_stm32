@@ -3,6 +3,9 @@
 /* Auto tracking behavior */
 #define SERVO_RUN_MS      200U
 #define DIR_COOLDOWN_MS  1500U
+#define TDOA_STEP_PWM      12U
+#define TDOA_DEADBAND_PWM   4U
+#define TDOA_SIGN           1
 
 static TIM_HandleTypeDef *s_htim = NULL;
 
@@ -44,6 +47,18 @@ static inline void motor_start_dir(char dir)
     write_pan(current_pan_pwm);
 }
 
+static uint16_t pan_pwm_from_tdoa_angle(int32_t angle_deg_x10)
+{
+    int32_t a = angle_deg_x10 * TDOA_SIGN;
+    if (a > 900) a = 900;
+    if (a < -900) a = -900;
+
+    /* Map -90~+90deg to PAN_LEFT~PAN_RIGHT */
+    const int32_t span = (int32_t)PAN_RIGHT - (int32_t)PAN_LEFT;
+    int32_t target = (int32_t)PAN_CENTER + (a * span) / 1800;
+    return clamp_u16(target, PAN_LEFT, PAN_RIGHT);
+}
+
 void motor_ctrl_init(TIM_HandleTypeDef *htim)
 {
     s_htim = htim;
@@ -64,6 +79,29 @@ void motor_ctrl_init(TIM_HandleTypeDef *htim)
 uint32_t motor_ctrl_get_lock_until_ms(void)
 {
     return motor_lock_until_ms;
+}
+
+void motor_ctrl_track_pan_tdoa(uint32_t now_ms, int32_t angle_deg_x10)
+{
+    (void)now_ms;
+    const uint16_t target = pan_pwm_from_tdoa_angle(angle_deg_x10);
+    const int32_t err = (int32_t)target - (int32_t)current_pan_pwm;
+
+    if (err >= -(int32_t)TDOA_DEADBAND_PWM && err <= (int32_t)TDOA_DEADBAND_PWM) {
+        write_pan(current_pan_pwm);
+    } else {
+        int32_t step = err;
+        if (step > (int32_t)TDOA_STEP_PWM) step = (int32_t)TDOA_STEP_PWM;
+        if (step < -(int32_t)TDOA_STEP_PWM) step = -(int32_t)TDOA_STEP_PWM;
+        current_pan_pwm = clamp_u16((int32_t)current_pan_pwm + step, PAN_LEFT, PAN_RIGHT);
+        write_pan(current_pan_pwm);
+    }
+
+    /* While TDOA tracking is active, disable old one-shot auto state machine. */
+    pending_dir = '-';
+    motor_running = 0U;
+    motor_lock_until_ms = 0U;
+    last_dir = '-';
 }
 
 void motor_ctrl_enter_manual(void)

@@ -10,6 +10,44 @@
 
 ---
 
+## [v1.2.10] - 2026-03-20
+### TDOA 5단계: 각도 기반 PAN 추종 + 자동 fallback 연계
+
+변경 전 상태/문제
+- 4단계까지는 TDOA 각도 신호 품질을 안정화했지만, 실제 AUTO 모터 제어는 여전히 `L/R` 2값 중심으로 동작했음.
+- TDOA `valid`가 존재해도 모터가 각도 연속 추종을 하지 않아, 세밀한 방향 제어 이점이 제한적이었음.
+
+왜 바꿨는지
+- TDOA 파이프라인 결과(`alpha_deg_x10`)를 실제 PAN 제어에 연결해
+  좌/우 이진 제어에서 연속 각도 추종으로 확장하기 위함.
+- TDOA 신호가 잠시 사라질 때는 기존 `detect_dir` 로직으로 자동 복귀해 안정성을 유지하기 위함.
+
+무엇을 어떻게 바꿨는지
+- `Core/Inc/motor_ctrl.h`
+  - `motor_ctrl_track_pan_tdoa()` API 추가
+- `Core/Src/motor_ctrl.c`
+  - TDOA 각도(-90~+90도)를 PAN PWM 범위로 매핑하는 함수 추가
+  - PAN 추종 시 step 제한(`TDOA_STEP_PWM`) + deadband(`TDOA_DEADBAND_PWM`) 적용
+  - TDOA 추종 활성 중 기존 one-shot auto state(`pending_dir/motor_running/lock`) 비활성화
+- `Core/Src/app.c`
+  - AUTO 루프에서 TDOA 우선 제어 경로 추가:
+    - `valid`면 TDOA 각도 추종
+    - `valid` 소실 시 짧은 hold(`TDOA_FALLBACK_HOLD_MS`) 후 기존 `mic_process()+motor_ctrl_process()`로 fallback
+  - 디버그 로그에 제어 소스 표기 `SRC:T/D/M` 추가
+
+변경 후 기능/안정성 개선 효과
+- AUTO 모드에서 TDOA 유효 시 PAN이 연속 각도 기반으로 부드럽게 추종.
+- TDOA 신호 공백 시 기존 L/R 로직으로 자동 복귀해 동작 연속성 확보.
+- 로그로 현재 제어 소스(`SRC`)를 즉시 확인 가능해 현장 디버깅 용이성 증가.
+
+영향 파일
+- `Core/Inc/motor_ctrl.h`
+- `Core/Src/motor_ctrl.c`
+- `Core/Src/app.c`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.9] - 2026-03-20
 ### TDOA 4단계: 히스테리시스 + hold + EMA + slew 제한
 
