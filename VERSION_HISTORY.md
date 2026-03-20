@@ -10,6 +10,43 @@
 
 ---
 
+## [v1.2.6] - 2026-03-20
+### TDOA 1단계 스켈레톤 API/디버그 경로 추가
+
+변경 전 상태/문제
+- TDOA 기능을 단계적으로 붙이려 해도, `mic` 모듈에 TDOA용 공용 API와 디버그 컨테이너가 없어
+  이후 단계(VAD/GCC-PHAT/각도 추정)를 안전하게 분리 적용하기 어려웠음.
+- 앱 레이어에서 “TDOA 활성/상태 조회”를 호출할 수 있는 최소 인터페이스가 부재했음.
+
+왜 바꿨는지
+- 1단계에서는 동작 변경 없이 인터페이스만 먼저 고정해서,
+  다음 단계 구현 시 회귀 범위를 줄이고 빌드 안정성을 확보하기 위함.
+
+무엇을 어떻게 바꿨는지
+- `Core/Inc/mic.h`
+  - `mic_tdoa_debug_t` 구조체 추가.
+  - TDOA API 선언 추가:
+    - `mic_tdoa_enable()`
+    - `mic_tdoa_process()`
+    - `mic_tdoa_is_valid()`
+    - `mic_get_tdoa_debug()`
+- `Core/Src/mic.c`
+  - 위 API의 1단계 스텁 구현 추가.
+  - `tdoa_enabled`, `tdoa_dbg` 런타임 상태 추가.
+  - 현재는 `peak_main/peak_second/confidence/vad_pass`만 placeholder로 갱신하고,
+    `lag/tau/angle/valid`는 고정(미추정)으로 유지.
+
+변경 후 기능/안정성 개선 효과
+- 코드가 아직 GCC-PHAT/TDOA 계산을 하지 않아 기존 좌/우 제어 동작에는 영향 없음.
+- 이후 단계 구현 시 `mic` API 변경 없이 내부만 확장 가능해 통합 리스크 감소.
+
+영향 파일
+- `Core/Inc/mic.h`
+- `Core/Src/mic.c`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.5] - 2026-03-20
 ### 워치독 로직 파일 분리(rpi_watchdog / sys_watchdog)
 

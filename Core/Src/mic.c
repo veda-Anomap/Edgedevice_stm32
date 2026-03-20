@@ -39,6 +39,10 @@ static volatile uint32_t noiseL = 1U, noiseR = 1U;
 static volatile uint32_t snrL_q8 = 0U, snrR_q8 = 0U;
 static volatile uint8_t noise_ready = 0U;
 
+/* Stage-1 TDOA skeleton runtime states */
+static volatile uint8_t tdoa_enabled = 0U;
+static volatile mic_tdoa_debug_t tdoa_dbg = {0};
+
 /* Direction state */
 static char detectLR = '-';
 static uint32_t last_switch_ms = 0U;
@@ -66,6 +70,11 @@ static inline uint32_t q8_ratio(uint32_t num, uint32_t den)
 {
     if (den == 0U) den = 1U;
     return (num << 8) / den;
+}
+
+static inline uint16_t u16_sat_u32(uint32_t v)
+{
+    return (v > 65535U) ? 65535U : (uint16_t)v;
 }
 
 static inline void ring_push_pair(uint16_t *histL,
@@ -106,6 +115,8 @@ static void mic_reset_state(void)
 
     gate_sound_dbg = gate_snr_dbg = gate_ratio_dbg = 0U;
     diff_dbg = 0U;
+    tdoa_enabled = 0U;
+    tdoa_dbg = (mic_tdoa_debug_t){0};
 
     sig_idx = sig_count = 0U;
     noise_idx = noise_count = 0U;
@@ -321,5 +332,50 @@ void mic_get_debug(mic_debug_t *out)
     out->gate_ratio = gate_ratio_dbg;
     out->noise_ready = noise_ready;
     out->detect_dir = detectLR;
+}
+
+void mic_tdoa_enable(uint8_t enable)
+{
+    tdoa_enabled = (enable != 0U) ? 1U : 0U;
+    if (tdoa_enabled == 0U) {
+        tdoa_dbg.valid = 0U;
+    }
+}
+
+void mic_tdoa_process(uint32_t now_ms)
+{
+    (void)now_ms;
+
+    /* Stage-1: keep estimator disabled, expose only runtime placeholders. */
+    const uint32_t pL = peakL;
+    const uint32_t pR = peakR;
+    const uint32_t pMain = (pL > pR) ? pL : pR;
+    const uint32_t pSecond = (pL > pR) ? pR : pL;
+
+    tdoa_dbg.peak_main = u16_sat_u32(pMain);
+    tdoa_dbg.peak_second = u16_sat_u32(pSecond);
+    tdoa_dbg.confidence_q8 = u16_sat_u32(q8_ratio(pMain, pSecond + 1U));
+    tdoa_dbg.vad_pass = ((lvlL >= SOUND_TH) || (lvlR >= SOUND_TH)) ? 1U : 0U;
+
+    tdoa_dbg.lag_samples = 0;
+    tdoa_dbg.tau_us = 0;
+    tdoa_dbg.alpha_deg_x10 = 0;
+    tdoa_dbg.valid = 0U;
+
+    if (tdoa_enabled == 0U) {
+        tdoa_dbg.vad_pass = 0U;
+    }
+}
+
+uint8_t mic_tdoa_is_valid(void)
+{
+    if (tdoa_enabled == 0U) return 0U;
+    return tdoa_dbg.valid;
+}
+
+void mic_get_tdoa_debug(mic_tdoa_debug_t *out)
+{
+    if (out == NULL) return;
+    *out = tdoa_dbg;
 }
 
