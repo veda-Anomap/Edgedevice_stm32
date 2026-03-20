@@ -44,6 +44,7 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_SOUND_SPEED_MM_S     343000.0f
 #define TDOA_PHAT_EPS             1.0e-9f
 #define TDOA_PI_F                 3.14159265358979323846f
+#define TDOA_LAG_MARGIN_SAMPLES   1
 /* Stage-4 stabilization: confidence hysteresis + hold + EMA + slew limit */
 #define TDOA_CONF_ON_Q8           384U
 #define TDOA_CONF_OFF_Q8          300U
@@ -77,6 +78,8 @@ static uint8_t tdoa_track_valid = 0U;
 static uint8_t tdoa_ema_init = 0U;
 static int32_t tdoa_ema_angle_x10 = 0;
 static uint32_t tdoa_last_good_ms = 0U;
+static float tdoa_hann[TDOA_FRAME_N];
+static uint8_t tdoa_hann_ready = 0U;
 
 /* Direction state */
 static char detectLR = '-';
@@ -131,7 +134,28 @@ static inline int32_t tdoa_clamp_i32(int32_t v, int32_t min_v, int32_t max_v)
     return v;
 }
 
-static void tdoa_dft_real_128(const int16_t *x, float *xr, float *xi)
+static int32_t tdoa_effective_lag_max(void)
+{
+    /* Physical max delay in samples: fs * d / c, plus small search margin. */
+    const float lag_phy = ((float)TDOA_FS_HZ * TDOA_MIC_DISTANCE_MM) / TDOA_SOUND_SPEED_MM_S;
+    int32_t lag = (int32_t)(lag_phy + 0.5f) + TDOA_LAG_MARGIN_SAMPLES;
+    if (lag < 1) lag = 1;
+    if (lag > TDOA_LAG_MAX) lag = TDOA_LAG_MAX;
+    return lag;
+}
+
+static void tdoa_prepare_hann(void)
+{
+    if (tdoa_hann_ready != 0U) return;
+
+    const float den = (float)(TDOA_FRAME_N - 1U);
+    for (uint32_t n = 0U; n < TDOA_FRAME_N; n++) {
+        tdoa_hann[n] = 0.5f - (0.5f * cosf((2.0f * TDOA_PI_F * (float)n) / den));
+    }
+    tdoa_hann_ready = 1U;
+}
+
+static void tdoa_dft_real_128(const int16_t *x, const float *win, float *xr, float *xi)
 {
     const uint32_t N = TDOA_FRAME_N;
     for (uint32_t k = 0U; k < N; k++) {
@@ -144,7 +168,10 @@ static void tdoa_dft_real_128(const int16_t *x, float *xr, float *xi)
         const float si = sinf(ang);
 
         for (uint32_t n = 0U; n < N; n++) {
-            const float xn = (float)x[n];
+            float xn = (float)x[n];
+            if (win != NULL) {
+                xn *= win[n];
+            }
             sum_r += xn * wr;
             sum_i += xn * wi;
 
@@ -229,6 +256,7 @@ static void mic_reset_state(void)
     tdoa_ema_init = 0U;
     tdoa_ema_angle_x10 = 0;
     tdoa_last_good_ms = 0U;
+    tdoa_hann_ready = 0U;
     memset(tdoa_acc_l, 0, sizeof(tdoa_acc_l));
     memset(tdoa_acc_r, 0, sizeof(tdoa_acc_r));
     memset(tdoa_ready_l, 0, sizeof(tdoa_ready_l));
@@ -491,6 +519,8 @@ void mic_tdoa_process(uint32_t now_ms)
         return;
     }
 
+    tdoa_prepare_hann();
+
     uint32_t seq0 = 0U;
     uint32_t seq1 = 0U;
     do {
@@ -539,9 +569,10 @@ void mic_tdoa_process(uint32_t now_ms)
     }
 
     /* Stage-3: lightweight GCC-PHAT pipeline (DFT -> PHAT normalize -> lag scan) */
-    tdoa_dft_real_128(frm_l, x1r, x1i);
-    tdoa_dft_real_128(frm_r, x2r, x2i);
+    tdoa_dft_real_128(frm_l, tdoa_hann, x1r, x1i);
+    tdoa_dft_real_128(frm_r, tdoa_hann, x2r, x2i);
 
+    const int32_t lag_max = tdoa_effective_lag_max();
     for (uint32_t k = 0U; k < TDOA_FRAME_N; k++) {
         /* G = X1 * conj(X2) */
         const float cr = x1r[k] * x2r[k] + x1i[k] * x2i[k];
@@ -555,7 +586,7 @@ void mic_tdoa_process(uint32_t now_ms)
     float best_peak = -1.0f;
     float second_peak = 0.0f;
 
-    for (int32_t lag = -TDOA_LAG_MAX; lag <= TDOA_LAG_MAX; lag++) {
+    for (int32_t lag = -lag_max; lag <= lag_max; lag++) {
         const float c = tdoa_phat_corr_at_lag(gr, gi, lag);
         const float a = fabsf(c);
         corr_abs[lag + TDOA_LAG_MAX] = a;
@@ -570,7 +601,7 @@ void mic_tdoa_process(uint32_t now_ms)
     }
 
     float p = 0.0f;
-    if ((best_lag > -TDOA_LAG_MAX) && (best_lag < TDOA_LAG_MAX)) {
+    if ((best_lag > -lag_max) && (best_lag < lag_max)) {
         const float a = corr_abs[best_lag - 1 + TDOA_LAG_MAX];
         const float b = corr_abs[best_lag + TDOA_LAG_MAX];
         const float c = corr_abs[best_lag + 1 + TDOA_LAG_MAX];

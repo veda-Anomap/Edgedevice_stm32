@@ -423,8 +423,9 @@ static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t
 
 static void uart1_recover_rx_error(uint32_t err_flags)
 {
-    /* FE/NE/ORE/PE 발생 시 HAL 클리어 매크로는 내부적으로 SR->DR 읽기 시퀀스를 수행한다.
-     * 실제 에러가 발생한 경우에만 클리어를 실행해 RX 스트림 영향(바이트 유실)을 최소화한다. */
+    /* FE/NE/ORE/PE error recovery:
+     * HAL clear macros internally perform the SR->DR clear sequence.
+     * Do recovery only when needed to reduce impact on RX throughput. */
     if ((err_flags & (HAL_UART_ERROR_ORE | HAL_UART_ERROR_FE |
                       HAL_UART_ERROR_NE  | HAL_UART_ERROR_PE)) != 0U) {
         __HAL_UART_CLEAR_PEFLAG(&huart1);
