@@ -10,6 +10,139 @@
 
 ---
 
+## [v1.2.5] - 2026-03-20
+### 워치독 로직 파일 분리(rpi_watchdog / sys_watchdog)
+
+변경 전 상태/문제
+- 외부 릴레이 워치독과 내부 IWDG 감시 로직이 `main.c`에 함께 있어
+  파일 크기가 커지고 수정 영향 범위 파악이 어려웠음.
+- 워치독 정책 변경 시 `main.c`의 생성 코드와 사용자 코드 경계가 복잡해 유지보수성이 떨어졌음.
+
+왜 바꿨는지
+- 외부 워치독(PC3/PC10)과 내부 워치독(IWDG refresh) 책임을 분리해
+  디버깅/테스트/정책 변경을 독립적으로 수행하기 위함.
+
+무엇을 어떻게 바꿨는지
+- 신규 파일 추가:
+  - `Core/Src/rpi_watchdog.c`, `Core/Inc/rpi_watchdog.h`
+  - `Core/Src/sys_watchdog.c`, `Core/Inc/sys_watchdog.h`
+- 외부 워치독 기능 이동:
+  - heartbeat 감시, hb arm 정책, 릴레이 컷/복구, UART2 로그
+  - 부팅 reset-cause/IWDG 설정 로그 출력
+- 내부 IWDG 기능 이동:
+  - alive counter 모니터링, miss 정책, `HAL_IWDG_Refresh` 수행/중단
+- `main.c`는 초기화 및 태스크 래퍼만 유지:
+  - `StartDefaultTask -> rpi_watchdog_task`
+  - `StartSystemMonitorTask -> sys_watchdog_task`
+
+변경 후 기능/안정성 개선 효과
+- 워치독 관련 코드 가독성/응집도 향상.
+- 외부/내부 워치독 단독 테스트가 쉬워져 장애 원인 분리 속도 개선.
+- `main.c` 복잡도 감소로 CubeMX 재생성 시 충돌 위험 완화.
+
+영향 파일
+- `Core/Src/main.c`
+- `Core/Src/rpi_watchdog.c` (신규)
+- `Core/Inc/rpi_watchdog.h` (신규)
+- `Core/Src/sys_watchdog.c` (신규)
+- `Core/Inc/sys_watchdog.h` (신규)
+- `VERSION_HISTORY.md`
+
+---
+
+## [v1.2.4] - 2026-03-20
+### 첫 Heartbeat 수신 전 timeout 비활성(오탐 릴레이 컷 방지)
+
+변경 전 상태/문제
+- 워치독은 grace 이후 heartbeat timeout 감시를 바로 시작했기 때문에,
+  RPi heartbeat 토글 프로그램을 수동으로 늦게 실행하면 첫 heartbeat를 받기 전에
+  timeout으로 릴레이가 동작할 수 있었음.
+
+왜 바꿨는지
+- 요구 동작이 “1/0이 오다가 끊길 때만 워치독 동작”이므로,
+  최초 heartbeat 이전에는 감시를 arm하지 않는 게 맞음.
+
+무엇을 어떻게 바꿨는지
+- `StartDefaultTask`에 `hb_armed` 상태 추가.
+- 초기/복구 직후에는 `hb_armed=0`으로 두고 timeout 판단 비활성.
+- 첫 엣지 감지 시 `hb_armed=1`로 전환하여 이후부터만 timeout 릴레이 컷 수행.
+- UART2 로그로 `waiting first edge` / `watchdog armed` 상태를 출력.
+
+변경 후 기능/안정성 개선 효과
+- heartbeat 미시작 상태에서 오탐 릴레이 컷 제거.
+- 실제 heartbeat가 살아있다가 끊길 때만 워치독 동작.
+
+영향 파일
+- `Core/Src/main.c`
+- `VERSION_HISTORY.md`
+
+---
+
+## [v1.2.3] - 2026-03-20
+### 워치독 태스크 스택 증설(512B -> 1536B)로 부팅 직후 리셋 반복 완화
+
+변경 전 상태/문제
+- UART2에 `[RST]`, `[IWDG]`까지만 찍히고 이후 로그가 끊기거나,
+  `[RPI-WDG] st`처럼 로그가 중간에서 잘린 채 재부팅되는 현상이 반복됨.
+- 리셋 원인 로그에서 `IWDG:1`이 계속 찍혀, 태스크가 정상 루프에 진입하기 전에
+  IWDG 갱신이 끊기는 패턴이 관측됨.
+
+왜 바꿨는지
+- `defaultTask`는 워치독 대기/토글 감시뿐 아니라 UART 포맷 로그(`vsnprintf`)와
+  `HAL_UART_Transmit` 호출 경로를 사용함.
+- 기존 `defaultTask` 스택이 `128*4 = 512B`로 작아, 포맷 문자열 처리/함수 호출 프레임이 겹치면
+  스택 마진이 부족해질 수 있음.
+- 스택 손상(또는 태스크 비정상 동작) 시 `SystemMonitorTask`가 IWDG refresh를 지속하지 못해
+  하드웨어 리셋으로 이어질 수 있으므로, 우선 스택 여유 확보가 필요했음.
+
+무엇을 어떻게 바꿨는지
+- `defaultTask` 스택 크기를 `128*4`에서 `384*4`로 증설.
+  - 변경 전: 512B
+  - 변경 후: 1536B
+- 코드 위치:
+  - `Core/Src/main.c` `defaultTask_attributes.stack_size`
+
+변경 후 기능/안정성 개선 효과
+- 부팅 직후 워치독 로그 출력 구간에서 태스크 스택 여유가 늘어나
+  로그 중간 절단/즉시 재부팅 가능성 완화.
+- 워치독 루프 진입 전후 구간 안정성이 개선되어 원인 분리(IWDG vs 전원강하) 진단이 쉬워짐.
+
+영향 파일
+- `Core/Src/main.c`
+- `VERSION_HISTORY.md`
+
+---
+
+## [v1.2.2] - 2026-03-20
+### STM 반복 리셋 원인 추적 로깅 + IWDG 갱신 스케줄링 보강
+
+변경 전 상태/문제
+- STM이 반복 리셋될 때, 원인이 IWDG인지 BOR(전원 강하)인지 부팅 로그만으로 구분하기 어려웠음.
+- `SystemMonitorTask`가 `Low` 우선순위라 UART burst/다른 태스크 부하 상황에서 IWDG 갱신 타이밍이 밀릴 여지가 있었음.
+
+왜 바꿨는지
+- 리셋 원인을 즉시 분류해 하드웨어 전원 문제와 소프트웨어 스케줄링 문제를 빠르게 분리하기 위함.
+- IWDG refresh 태스크의 실행 우선권을 높여 불필요한 watchdog 리셋 가능성을 줄이기 위함.
+
+무엇을 어떻게 바꿨는지
+- 부팅 직후 UART2로 reset cause 플래그를 출력하도록 추가:
+  - `BOR/PIN/POR/SW/IWDG/WWDG/LPWR`
+- 출력 후 `__HAL_RCC_CLEAR_RESET_FLAGS()`로 플래그 클리어.
+- IWDG 설정값 출력 로그 추가(`presc`, `reload`, `miss_max`).
+- 태스크 우선순위 조정:
+  - `SystemMonitorTask`: `Low -> AboveNormal`
+  - `UartRxTask`: `AboveNormal -> Normal`
+
+변경 후 기능/안정성 개선 효과
+- 리셋 발생 시 원인 판별 속도 향상(IWDG 리셋 vs 전원 이슈).
+- UART 입력 부하가 있어도 IWDG 갱신 태스크가 덜 밀려 안정성 향상.
+
+영향 파일
+- `Core/Src/main.c`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.1] - 2026-03-20
 ### 외부/내부 워치독 최종 튜닝 + 큐 복구 반영
 

@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+﻿/* USER CODE BEGIN Header */
 /**
   ******************************************************************************
   * @file           : main.c
@@ -25,8 +25,8 @@
 /* USER CODE BEGIN Includes */
 #include "app.h"
 #include "ir_led.h"
-#include <stdio.h>
-#include <stdarg.h>
+#include "rpi_watchdog.h"
+#include "sys_watchdog.h"
 
 /* USER CODE END Includes */
 
@@ -72,7 +72,8 @@ UART_HandleTypeDef huart2;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  /* Watchdog task uses UART log formatting path; keep enough stack margin */
+  .stack_size = 384 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for UartRxTask */
@@ -80,7 +81,7 @@ osThreadId_t UartRxTaskHandle;
 const osThreadAttr_t UartRxTask_attributes = {
   .name = "UartRxTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for ControlTask */
 osThreadId_t ControlTaskHandle;
@@ -120,14 +121,8 @@ static osThreadId_t SystemMonitorTaskHandle;
 static const osThreadAttr_t SystemMonitorTask_attributes = {
   .name = "SystemMonitorTask",
   .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
-
-/* RPi heartbeat/relay watchdog shared states */
-static volatile uint32_t rpi_alive_counter = 0U;
-static volatile uint32_t rpi_last_heartbeat_tick = 0U;
-static volatile uint32_t rpi_miss_count = 0U;
-static volatile uint32_t rpi_relay_reset_count = 0U;
 
 /* USER CODE END PV */
 
@@ -154,36 +149,12 @@ void StartSystemMonitorTask(void *argument);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-#ifdef HAL_IWDG_MODULE_ENABLED
-extern IWDG_HandleTypeDef hiwdg;
-#endif
-
 int _write(int file, char *ptr, int len)
 {
     /* UART2 debug print path is currently disabled */
     (void)file;
     (void)ptr;
     return len;
-}
-
-static void rpi_wdg_uart2_log(const char *fmt, ...)
-{
-#if RPI_WDG_UART_LOG_ENABLE
-  char msg[160];
-  va_list ap;
-  va_start(ap, fmt);
-  int n = vsnprintf(msg, sizeof(msg), fmt, ap);
-  va_end(ap);
-
-  if (n <= 0) {
-    return;
-  }
-
-  uint16_t tx_len = (n < (int)sizeof(msg)) ? (uint16_t)n : (uint16_t)(sizeof(msg) - 1U);
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)msg, tx_len, 100U);
-#else
-  (void)fmt;
-#endif
 }
 /* USER CODE END 0 */
 
@@ -234,6 +205,23 @@ int main(void)
   //IR_LED_All_Off(); // PB0, PB1, PB2 OFF
   // HAL_ADC_Start(&hadc1); // ADC path disabled (I2S path in use)
 //  HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+
+  const rpi_watchdog_cfg_t rpi_wdg_cfg = {
+    .grace_sec = RPI_WDG_GRACE_SEC,
+    .heartbeat_timeout_ms = RPI_HEARTBEAT_TIMEOUT_MS,
+    .relay_cut_sec = RPI_RELAY_CUT_SEC,
+    .poll_ms = RPI_WDG_POLL_MS,
+    .uart_log_enable = (uint8_t)RPI_WDG_UART_LOG_ENABLE
+  };
+  const sys_watchdog_cfg_t sys_wdg_cfg = {
+    .period_ms = SYS_MONITOR_PERIOD_MS,
+    .miss_max = SYS_MONITOR_MISS_MAX
+  };
+
+  rpi_watchdog_init(&huart2, &rpi_wdg_cfg);
+  sys_watchdog_init(&hiwdg, &sys_wdg_cfg);
+  rpi_watchdog_log_boot_status(&hiwdg, sys_wdg_cfg.miss_max);
+
   app_init();
 
   /* USER CODE END 2 */
@@ -700,55 +688,9 @@ static uint16_t Read_ADC_PC0(void)
 }
 #endif
 
-/* Keep watchdog alive counter moving while waiting in second-scale windows. */
-static void rpi_wdg_wait_seconds_and_mark_alive(uint32_t seconds)
-{
-  for (uint32_t i = 0U; i < seconds; i++) {
-    rpi_alive_counter++;
-    osDelay(1000U);
-  }
-}
-
-/* Reset heartbeat base line after grace/recovery window. */
-static GPIO_PinState rpi_wdg_sync_heartbeat_baseline(void)
-{
-  const GPIO_PinState level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
-  rpi_last_heartbeat_tick = osKernelGetTickCount();
-  return level;
-}
-
 void StartSystemMonitorTask(void *argument)
 {
-  (void)argument;
-
-  /* Initial snapshot prevents startup order jitter from counting as a miss */
-  uint32_t last_seen_counter = rpi_alive_counter;
-
-  for(;;)
-  {
-    osDelay(SYS_MONITOR_PERIOD_MS);
-
-    if (rpi_alive_counter != last_seen_counter) {
-      last_seen_counter = rpi_alive_counter;
-      rpi_miss_count = 0U;
-
-#ifdef HAL_IWDG_MODULE_ENABLED
-      (void)HAL_IWDG_Refresh(&hiwdg);
-#endif
-    } else {
-      if (rpi_miss_count < 0xFFFFFFFFU) {
-        rpi_miss_count++;
-      }
-
-      if (rpi_miss_count < SYS_MONITOR_MISS_MAX) {
-#ifdef HAL_IWDG_MODULE_ENABLED
-        (void)HAL_IWDG_Refresh(&hiwdg);
-#endif
-      } else {
-        /* Intentionally stop IWDG refresh to force hardware reset */
-      }
-    }
-  }
+  sys_watchdog_task(argument);
 }
 /* USER CODE END 4 */
 
@@ -762,62 +704,7 @@ void StartSystemMonitorTask(void *argument)
 void StartDefaultTask(void *argument)
 {
   /* USER CODE BEGIN 5 */
-  (void)argument;
-
-  /* Active-high relay module: keep LOW in normal operation. */
-  HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET);
-
-  /* Initial grace period for RPi boot. */
-  rpi_wdg_wait_seconds_and_mark_alive(RPI_WDG_GRACE_SEC);
-
-  GPIO_PinState last_level = rpi_wdg_sync_heartbeat_baseline();
-  uint32_t hb_edges = 0U;
-
-  rpi_wdg_uart2_log("[RPI-WDG] start: grace=%lus timeout=%lums cut=%lus\r\n",
-                    (unsigned long)RPI_WDG_GRACE_SEC,
-                    (unsigned long)RPI_HEARTBEAT_TIMEOUT_MS,
-                    (unsigned long)RPI_RELAY_CUT_SEC);
-
-  for(;;)
-  {
-    const uint32_t now = osKernelGetTickCount();
-    const GPIO_PinState cur_level = HAL_GPIO_ReadPin(RPI_HB_GPIO_Port, RPI_HB_Pin);
-
-    rpi_alive_counter++;
-
-    if (cur_level != last_level) {
-      last_level = cur_level;
-      rpi_last_heartbeat_tick = now;
-      hb_edges++;
-      rpi_wdg_uart2_log("[RPI-HB] level=%lu edge=%lu link=OK\r\n",
-                        (unsigned long)((cur_level == GPIO_PIN_SET) ? 1U : 0U),
-                        (unsigned long)hb_edges);
-    }
-
-    if ((now - rpi_last_heartbeat_tick) > RPI_HEARTBEAT_TIMEOUT_MS) {
-      rpi_wdg_uart2_log("[RPI-HB] timeout=%lums -> link=LOST, relay cut\r\n",
-                        (unsigned long)RPI_HEARTBEAT_TIMEOUT_MS);
-      /* Cut RPi power via relay to force reboot. */
-      HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_SET);
-
-      /* Keep system monitor fed while relay cut is in progress. */
-      rpi_wdg_wait_seconds_and_mark_alive(RPI_RELAY_CUT_SEC);
-
-      /* Restore relay (power back on). */
-      HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET);
-      rpi_relay_reset_count++;
-      rpi_wdg_uart2_log("[RPI-WDG] relay restore done, reset_count=%lu, grace wait\r\n",
-                        (unsigned long)rpi_relay_reset_count);
-
-      /* Wait for RPi reboot grace period after power restore. */
-      rpi_wdg_wait_seconds_and_mark_alive(RPI_WDG_GRACE_SEC);
-
-      last_level = rpi_wdg_sync_heartbeat_baseline();
-      rpi_wdg_uart2_log("[RPI-WDG] grace done, heartbeat monitoring restart\r\n");
-    }
-
-    osDelay(RPI_WDG_POLL_MS);
-  }
+  rpi_watchdog_task(argument);
   /* USER CODE END 5 */
 }
 
