@@ -708,7 +708,7 @@ void app_sensor_loop(void)
 
             printf("I2S_L:%4lu I2S_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
                    "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu | "
-                   "TDOA[V:%u L:%ld C:%u] | "
+                   "TDOA[V:%u L:%ld T:%ldus A:%ld.%01lddeg C:%u] | "
                    "U1[Q:%lu IN:%lu FR:%lu DR:%lu ER:%lu O:%lu F:%lu N:%lu P:%lu "
                    "IV:%lu OV:%lu R:%lu RO:%lu RF:%lu]\r\n",
                    (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
@@ -720,6 +720,9 @@ void app_sensor_loop(void)
                      (unsigned long)light.light_raw,
                      (unsigned)tdbg.valid,
                      (long)tdbg.lag_samples,
+                     (long)tdbg.tau_us,
+                     (long)(tdbg.alpha_deg_x10 / 10),
+                     (long)((tdbg.alpha_deg_x10 < 0) ? -(tdbg.alpha_deg_x10 % 10) : (tdbg.alpha_deg_x10 % 10)),
                      (unsigned)tdbg.confidence_q8,
                      (unsigned long)u1_q_used,
                      (unsigned long)s_u1_isr_bytes,

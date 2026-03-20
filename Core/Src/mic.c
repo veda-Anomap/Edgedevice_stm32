@@ -1,5 +1,6 @@
 #include "mic.h"
 #include <string.h>
+#include <math.h>
 
 /* Interleaved frame: [L, R, L, R, ...] */
 #define ADC_BUF_LEN 200U
@@ -40,6 +41,10 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_VAD_MEANABS_TH       380U
 #define TDOA_CONF_TH_Q8           320U
 #define TDOA_COARSE_MAX_DEG_X10   750
+#define TDOA_MIC_DISTANCE_MM      120.0f
+#define TDOA_SOUND_SPEED_MM_S     343000.0f
+#define TDOA_PHAT_EPS             1.0e-9f
+#define TDOA_PI_F                 3.14159265358979323846f
 
 /* Shared states updated in ISR context */
 static volatile uint32_t lvlL = 0U, lvlR = 0U;
@@ -97,25 +102,9 @@ static inline uint16_t u16_sat_u32(uint32_t v)
     return (v > 65535U) ? 65535U : (uint16_t)v;
 }
 
-static inline uint32_t u32_sat_u64(uint64_t v)
-{
-    return (v > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : (uint32_t)v;
-}
-
 static inline uint32_t u32_abs_i16(int16_t v)
 {
     return (v >= 0) ? (uint32_t)v : (uint32_t)(-(int32_t)v);
-}
-
-static inline uint64_t u64_abs_i64(int64_t v)
-{
-    return (v >= 0) ? (uint64_t)v : (uint64_t)(-v);
-}
-
-static inline int32_t tdoa_tau_us_from_lag(int32_t lag)
-{
-    /* tau_us = lag / Fs * 1e6 */
-    return (int32_t)(((int64_t)lag * 1000000LL) / (int64_t)TDOA_FS_HZ);
 }
 
 static inline int32_t tdoa_coarse_angle_x10_from_lag(int32_t lag)
@@ -123,6 +112,56 @@ static inline int32_t tdoa_coarse_angle_x10_from_lag(int32_t lag)
     if (lag > TDOA_LAG_MAX) lag = TDOA_LAG_MAX;
     if (lag < -TDOA_LAG_MAX) lag = -TDOA_LAG_MAX;
     return (lag * TDOA_COARSE_MAX_DEG_X10) / TDOA_LAG_MAX;
+}
+
+static void tdoa_dft_real_128(const int16_t *x, float *xr, float *xi)
+{
+    const uint32_t N = TDOA_FRAME_N;
+    for (uint32_t k = 0U; k < N; k++) {
+        float sum_r = 0.0f;
+        float sum_i = 0.0f;
+        float wr = 1.0f;
+        float wi = 0.0f;
+        const float ang = -2.0f * TDOA_PI_F * (float)k / (float)N;
+        const float sr = cosf(ang);
+        const float si = sinf(ang);
+
+        for (uint32_t n = 0U; n < N; n++) {
+            const float xn = (float)x[n];
+            sum_r += xn * wr;
+            sum_i += xn * wi;
+
+            const float nwr = wr * sr - wi * si;
+            const float nwi = wr * si + wi * sr;
+            wr = nwr;
+            wi = nwi;
+        }
+        xr[k] = sum_r;
+        xi[k] = sum_i;
+    }
+}
+
+static float tdoa_phat_corr_at_lag(const float *gr, const float *gi, int32_t lag)
+{
+    const uint32_t N = TDOA_FRAME_N;
+    float acc = 0.0f;
+    float wr = 1.0f;
+    float wi = 0.0f;
+    const float ang = 2.0f * TDOA_PI_F * (float)lag / (float)N;
+    const float sr = cosf(ang);
+    const float si = sinf(ang);
+
+    for (uint32_t k = 0U; k < N; k++) {
+        /* real{ Gphat[k] * exp(+j*2*pi*k*lag/N) } */
+        acc += (gr[k] * wr - gi[k] * wi);
+
+        const float nwr = wr * sr - wi * si;
+        const float nwi = wr * si + wi * sr;
+        wr = nwr;
+        wi = nwi;
+    }
+
+    return acc / (float)N;
 }
 
 static inline void ring_push_pair(uint16_t *histL,
@@ -418,6 +457,10 @@ void mic_tdoa_process(uint32_t now_ms)
     static int16_t cur_r[TDOA_HALF_N];
     static int16_t frm_l[TDOA_FRAME_N];
     static int16_t frm_r[TDOA_FRAME_N];
+    static float x1r[TDOA_FRAME_N], x1i[TDOA_FRAME_N];
+    static float x2r[TDOA_FRAME_N], x2i[TDOA_FRAME_N];
+    static float gr[TDOA_FRAME_N], gi[TDOA_FRAME_N];
+    static float corr_abs[(TDOA_LAG_MAX * 2) + 1];
 
     if (tdoa_enabled == 0U) {
         tdoa_dbg.vad_pass = 0U;
@@ -472,40 +515,78 @@ void mic_tdoa_process(uint32_t now_ms)
         return;
     }
 
+    /* Stage-3: lightweight GCC-PHAT pipeline (DFT -> PHAT normalize -> lag scan) */
+    tdoa_dft_real_128(frm_l, x1r, x1i);
+    tdoa_dft_real_128(frm_r, x2r, x2i);
+
+    for (uint32_t k = 0U; k < TDOA_FRAME_N; k++) {
+        /* G = X1 * conj(X2) */
+        const float cr = x1r[k] * x2r[k] + x1i[k] * x2i[k];
+        const float ci = x1i[k] * x2r[k] - x1r[k] * x2i[k];
+        const float mag = sqrtf(cr * cr + ci * ci) + TDOA_PHAT_EPS;
+        gr[k] = cr / mag;
+        gi[k] = ci / mag;
+    }
+
     int32_t best_lag = 0;
-    uint64_t best_peak = 0ULL;
-    uint64_t second_peak = 0ULL;
+    float best_peak = -1.0f;
+    float second_peak = 0.0f;
 
     for (int32_t lag = -TDOA_LAG_MAX; lag <= TDOA_LAG_MAX; lag++) {
-        int64_t acc = 0;
-        for (int32_t i = 0; i < (int32_t)TDOA_FRAME_N; i++) {
-            const int32_t j = i - lag;
-            if ((j < 0) || (j >= (int32_t)TDOA_FRAME_N)) continue;
-            acc += (int32_t)frm_l[i] * (int32_t)frm_r[j];
-        }
-        const uint64_t peak = u64_abs_i64(acc);
-        if (peak > best_peak) {
+        const float c = tdoa_phat_corr_at_lag(gr, gi, lag);
+        const float a = fabsf(c);
+        corr_abs[lag + TDOA_LAG_MAX] = a;
+
+        if (a > best_peak) {
             second_peak = best_peak;
-            best_peak = peak;
+            best_peak = a;
             best_lag = lag;
-        } else if (peak > second_peak) {
-            second_peak = peak;
+        } else if (a > second_peak) {
+            second_peak = a;
         }
     }
 
+    float p = 0.0f;
+    if ((best_lag > -TDOA_LAG_MAX) && (best_lag < TDOA_LAG_MAX)) {
+        const float a = corr_abs[best_lag - 1 + TDOA_LAG_MAX];
+        const float b = corr_abs[best_lag + TDOA_LAG_MAX];
+        const float c = corr_abs[best_lag + 1 + TDOA_LAG_MAX];
+        const float den = (a - (2.0f * b) + c);
+        if (fabsf(den) > 1.0e-9f) {
+            p = 0.5f * (a - c) / den;
+            if (p > 0.5f) p = 0.5f;
+            if (p < -0.5f) p = -0.5f;
+        }
+    }
+
+    const float lag_f = (float)best_lag + p;
+    const float tau_us_f = lag_f * (1000000.0f / (float)TDOA_FS_HZ);
+    const float tau_max_us = (TDOA_MIC_DISTANCE_MM / TDOA_SOUND_SPEED_MM_S) * 1000000.0f;
+    float x = tau_us_f / tau_max_us;
+    if (x > 1.0f) x = 1.0f;
+    if (x < -1.0f) x = -1.0f;
+    const float alpha_rad = asinf(x);
+    const float alpha_deg_x10_f = alpha_rad * (1800.0f / TDOA_PI_F);
+
     tdoa_dbg.lag_samples = best_lag;
-    tdoa_dbg.tau_us = tdoa_tau_us_from_lag(best_lag);
-    tdoa_dbg.alpha_deg_x10 = tdoa_coarse_angle_x10_from_lag(best_lag);
+    tdoa_dbg.tau_us = (int32_t)tau_us_f;
+    tdoa_dbg.alpha_deg_x10 = (int32_t)alpha_deg_x10_f;
 
     /* compress peaks for log readability */
-    const uint32_t p_main = u32_sat_u64(best_peak >> 12);
-    const uint32_t p_second = u32_sat_u64(second_peak >> 12);
+    const uint32_t p_main = (uint32_t)(best_peak * 1000.0f);
+    const uint32_t p_second = (uint32_t)(second_peak * 1000.0f);
     tdoa_dbg.peak_main = u16_sat_u32(p_main);
     tdoa_dbg.peak_second = u16_sat_u32(p_second);
 
-    uint64_t conf64 = (best_peak << 8) / (second_peak + 1ULL);
-    if (conf64 > 65535ULL) conf64 = 65535ULL;
-    tdoa_dbg.confidence_q8 = (uint16_t)conf64;
+    const float conf_q8_f = (best_peak * 256.0f) / (second_peak + 1.0e-6f);
+    uint32_t conf_q8 = (conf_q8_f >= 65535.0f) ? 65535U : (uint32_t)conf_q8_f;
+    tdoa_dbg.confidence_q8 = (uint16_t)conf_q8;
+
+    /* keep previous coarse fallback compatibility if angle is NaN */
+    if (!isfinite((double)alpha_deg_x10_f)) {
+        tdoa_dbg.alpha_deg_x10 = tdoa_coarse_angle_x10_from_lag(best_lag);
+    }
+
     tdoa_dbg.valid = (tdoa_dbg.confidence_q8 >= TDOA_CONF_TH_Q8) ? 1U : 0U;
 }
 
