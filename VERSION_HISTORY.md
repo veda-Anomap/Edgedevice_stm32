@@ -10,6 +10,43 @@
 
 ---
 
+## [v1.2.11] - 2026-03-20
+### TDOA 6단계: PAN 추종기 가변 이득 + 가속도 제한
+
+변경 전 상태/문제
+- 5단계는 TDOA 각도 연동은 되었지만, PAN 추종 step이 사실상 고정에 가까워
+  큰 오차 구간에서 느리고, 목표 근처에서는 미세 떨림 체감이 남을 수 있었음.
+- 추종 속도 상태가 없어 프레임 간 오차 변화에 따른 자연스러운 가감속이 부족했음.
+
+왜 바꿨는지
+- 실제 팬틸트 동작에서 “멀 때 빠르게 / 가까우면 부드럽게” 동작하도록
+  추종 프로파일을 제어기 형태로 개선하기 위함.
+
+무엇을 어떻게 바꿨는지
+- `Core/Src/motor_ctrl.c`
+  - TDOA 추종 파라미터 추가:
+    - `TDOA_STEP_MIN/MAX_PWM`
+    - `TDOA_GAIN_Q8`
+    - `TDOA_ACCEL_UP/DN_PWM`
+    - `TDOA_DEADBAND_PWM`
+  - 내부 속도 상태(`tdoa_track_speed_pwm`) 도입
+  - `motor_ctrl_track_pan_tdoa()`를 가변 이득 + 가속도 제한 방식으로 변경:
+    - 오차 기반 목표 step 계산
+    - step 변화율 제한(accel/decel limit)
+    - 목표점 근처 overshoot 방지(목표 교차 시 클램프)
+  - 모드 전환/기존 detect_dir 제어 진입 시 추종 속도 상태 초기화
+
+변경 후 기능/안정성 개선 효과
+- 큰 각도 오차에서 추종 응답 속도 향상.
+- 목표 근처에서 속도가 줄어 급한 튐/잔떨림 완화.
+- AUTO fallback 경로(`SRC:D`)와 공존하면서 제어 전환 충격 감소.
+
+영향 파일
+- `Core/Src/motor_ctrl.c`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.10] - 2026-03-20
 ### TDOA 5단계: 각도 기반 PAN 추종 + 자동 fallback 연계
 
