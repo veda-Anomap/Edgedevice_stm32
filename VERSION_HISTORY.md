@@ -10,6 +10,42 @@
 
 ---
 
+## [v1.2.9] - 2026-03-20
+### TDOA 4단계: 히스테리시스 + hold + EMA + slew 제한
+
+변경 전 상태/문제
+- 3단계에서 `tau/angle` 계산은 가능해졌지만, 반향/잡음 환경에서 confidence가 경계값 근처를 오갈 때
+  `valid`가 빠르게 깜빡이며 각도도 프레임 단위로 흔들릴 수 있었음.
+- 모터 추종 전에 각도 신호를 한 번 더 안정화하지 않으면 미세 진동/방향 반전 체감이 커질 수 있었음.
+
+왜 바꿨는지
+- 실시간 운용에서 “신뢰도 경계 출렁임”을 줄이고, 연속 프레임의 각도 변화를 부드럽게 만들어
+  제어 입력으로 쓰기 좋은 형태로 다듬기 위함.
+
+무엇을 어떻게 바꿨는지
+- `Core/Src/mic.c`
+  - confidence 히스테리시스 추가:
+    - ON 임계(`TDOA_CONF_ON_Q8`)
+    - OFF 임계(`TDOA_CONF_OFF_Q8`)
+  - 유효 신호 hold 시간(`TDOA_VALID_HOLD_MS`) 추가:
+    - 순간적인 confidence 하락에도 짧은 구간은 `valid` 유지
+  - 각도 안정화 필터 추가:
+    - 프레임 간 최대 변화량 제한(`TDOA_MAX_STEP_DEG_X10`)
+    - EMA(`TDOA_EMA_ALPHA_Q8`) 적용
+    - 각도 clamp(`TDOA_ANGLE_CLAMP_DEG_X10`) 적용
+  - 내부 상태 변수(`tdoa_track_valid`, `tdoa_last_good_ms`, `tdoa_ema_angle_x10`) 추가
+
+변경 후 기능/안정성 개선 효과
+- confidence 경계 구간에서 `valid` 깜빡임이 줄어듦.
+- 각도 변화가 단계적으로 완만해져 추종 신호 품질 향상.
+- 이후 모터 제어 연결 단계에서 진동/급반전 리스크 감소.
+
+영향 파일
+- `Core/Src/mic.c`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.8] - 2026-03-20
 ### TDOA 3단계: 경량 GCC-PHAT + 서브샘플 보간 + 각도 산출
 

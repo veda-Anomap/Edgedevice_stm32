@@ -39,12 +39,18 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_FS_HZ                16000U
 #define TDOA_LAG_MAX              8
 #define TDOA_VAD_MEANABS_TH       380U
-#define TDOA_CONF_TH_Q8           320U
 #define TDOA_COARSE_MAX_DEG_X10   750
 #define TDOA_MIC_DISTANCE_MM      120.0f
 #define TDOA_SOUND_SPEED_MM_S     343000.0f
 #define TDOA_PHAT_EPS             1.0e-9f
 #define TDOA_PI_F                 3.14159265358979323846f
+/* Stage-4 stabilization: confidence hysteresis + hold + EMA + slew limit */
+#define TDOA_CONF_ON_Q8           384U
+#define TDOA_CONF_OFF_Q8          300U
+#define TDOA_VALID_HOLD_MS        120U
+#define TDOA_EMA_ALPHA_Q8         64U
+#define TDOA_MAX_STEP_DEG_X10     80
+#define TDOA_ANGLE_CLAMP_DEG_X10  900
 
 /* Shared states updated in ISR context */
 static volatile uint32_t lvlL = 0U, lvlR = 0U;
@@ -67,6 +73,10 @@ static uint32_t tdoa_seen_seq = 0U;
 static int16_t tdoa_prev_l[TDOA_HALF_N];
 static int16_t tdoa_prev_r[TDOA_HALF_N];
 static uint8_t tdoa_prev_valid = 0U;
+static uint8_t tdoa_track_valid = 0U;
+static uint8_t tdoa_ema_init = 0U;
+static int32_t tdoa_ema_angle_x10 = 0;
+static uint32_t tdoa_last_good_ms = 0U;
 
 /* Direction state */
 static char detectLR = '-';
@@ -112,6 +122,13 @@ static inline int32_t tdoa_coarse_angle_x10_from_lag(int32_t lag)
     if (lag > TDOA_LAG_MAX) lag = TDOA_LAG_MAX;
     if (lag < -TDOA_LAG_MAX) lag = -TDOA_LAG_MAX;
     return (lag * TDOA_COARSE_MAX_DEG_X10) / TDOA_LAG_MAX;
+}
+
+static inline int32_t tdoa_clamp_i32(int32_t v, int32_t min_v, int32_t max_v)
+{
+    if (v < min_v) return min_v;
+    if (v > max_v) return max_v;
+    return v;
 }
 
 static void tdoa_dft_real_128(const int16_t *x, float *xr, float *xi)
@@ -208,6 +225,10 @@ static void mic_reset_state(void)
     tdoa_ready_seq = 0U;
     tdoa_seen_seq = 0U;
     tdoa_prev_valid = 0U;
+    tdoa_track_valid = 0U;
+    tdoa_ema_init = 0U;
+    tdoa_ema_angle_x10 = 0;
+    tdoa_last_good_ms = 0U;
     memset(tdoa_acc_l, 0, sizeof(tdoa_acc_l));
     memset(tdoa_acc_r, 0, sizeof(tdoa_acc_r));
     memset(tdoa_ready_l, 0, sizeof(tdoa_ready_l));
@@ -447,6 +468,8 @@ void mic_tdoa_enable(uint8_t enable)
     tdoa_enabled = (enable != 0U) ? 1U : 0U;
     if (tdoa_enabled == 0U) {
         tdoa_dbg.valid = 0U;
+        tdoa_track_valid = 0U;
+        tdoa_ema_init = 0U;
     }
 }
 
@@ -567,10 +590,11 @@ void mic_tdoa_process(uint32_t now_ms)
     if (x < -1.0f) x = -1.0f;
     const float alpha_rad = asinf(x);
     const float alpha_deg_x10_f = alpha_rad * (1800.0f / TDOA_PI_F);
+    const int32_t alpha_raw_x10 = (int32_t)alpha_deg_x10_f;
 
     tdoa_dbg.lag_samples = best_lag;
     tdoa_dbg.tau_us = (int32_t)tau_us_f;
-    tdoa_dbg.alpha_deg_x10 = (int32_t)alpha_deg_x10_f;
+    tdoa_dbg.alpha_deg_x10 = alpha_raw_x10;
 
     /* compress peaks for log readability */
     const uint32_t p_main = (uint32_t)(best_peak * 1000.0f);
@@ -579,7 +603,7 @@ void mic_tdoa_process(uint32_t now_ms)
     tdoa_dbg.peak_second = u16_sat_u32(p_second);
 
     const float conf_q8_f = (best_peak * 256.0f) / (second_peak + 1.0e-6f);
-    uint32_t conf_q8 = (conf_q8_f >= 65535.0f) ? 65535U : (uint32_t)conf_q8_f;
+    const uint32_t conf_q8 = (conf_q8_f >= 65535.0f) ? 65535U : (uint32_t)conf_q8_f;
     tdoa_dbg.confidence_q8 = (uint16_t)conf_q8;
 
     /* keep previous coarse fallback compatibility if angle is NaN */
@@ -587,7 +611,45 @@ void mic_tdoa_process(uint32_t now_ms)
         tdoa_dbg.alpha_deg_x10 = tdoa_coarse_angle_x10_from_lag(best_lag);
     }
 
-    tdoa_dbg.valid = (tdoa_dbg.confidence_q8 >= TDOA_CONF_TH_Q8) ? 1U : 0U;
+    /* Stage-4: confidence hysteresis + hold window */
+    uint8_t conf_good = 0U;
+    if (tdoa_track_valid != 0U) {
+        conf_good = (tdoa_dbg.confidence_q8 >= TDOA_CONF_OFF_Q8) ? 1U : 0U;
+    } else {
+        conf_good = (tdoa_dbg.confidence_q8 >= TDOA_CONF_ON_Q8) ? 1U : 0U;
+    }
+
+    if ((tdoa_dbg.vad_pass != 0U) && (conf_good != 0U)) {
+        tdoa_last_good_ms = now_ms;
+        if (tdoa_track_valid == 0U) {
+            tdoa_track_valid = 1U;
+            tdoa_ema_init = 0U;
+        }
+    } else if (tdoa_track_valid != 0U) {
+        if ((now_ms - tdoa_last_good_ms) > TDOA_VALID_HOLD_MS) {
+            tdoa_track_valid = 0U;
+        }
+    }
+
+    /* Stage-4: angle smoothing (slew-limited EMA) */
+    if (tdoa_track_valid != 0U) {
+        int32_t raw = tdoa_dbg.alpha_deg_x10;
+        raw = tdoa_clamp_i32(raw, -TDOA_ANGLE_CLAMP_DEG_X10, TDOA_ANGLE_CLAMP_DEG_X10);
+
+        if (tdoa_ema_init == 0U) {
+            tdoa_ema_angle_x10 = raw;
+            tdoa_ema_init = 1U;
+        } else if ((tdoa_dbg.vad_pass != 0U) && (conf_good != 0U)) {
+            int32_t delta = raw - tdoa_ema_angle_x10;
+            delta = tdoa_clamp_i32(delta, -TDOA_MAX_STEP_DEG_X10, TDOA_MAX_STEP_DEG_X10);
+            tdoa_ema_angle_x10 += (delta * (int32_t)TDOA_EMA_ALPHA_Q8) / 256;
+        }
+
+        tdoa_dbg.alpha_deg_x10 = tdoa_ema_angle_x10;
+        tdoa_dbg.valid = 1U;
+    } else {
+        tdoa_dbg.valid = 0U;
+    }
 }
 
 uint8_t mic_tdoa_is_valid(void)
