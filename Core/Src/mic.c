@@ -45,6 +45,8 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_PHAT_EPS             1.0e-9f
 #define TDOA_PI_F                 3.14159265358979323846f
 #define TDOA_LAG_MARGIN_SAMPLES   1
+#define TDOA_PROCESS_PERIOD_MS    20U
+#define TDOA_STALE_INVALID_MS     300U
 /* Stage-4 stabilization: confidence hysteresis + hold + EMA + slew limit */
 #define TDOA_CONF_ON_Q8           384U
 #define TDOA_CONF_OFF_Q8          300U
@@ -78,6 +80,8 @@ static uint8_t tdoa_track_valid = 0U;
 static uint8_t tdoa_ema_init = 0U;
 static int32_t tdoa_ema_angle_x10 = 0;
 static uint32_t tdoa_last_good_ms = 0U;
+static uint32_t tdoa_last_proc_ms = 0U;
+static uint32_t tdoa_last_result_ms = 0U;
 static float tdoa_hann[TDOA_FRAME_N];
 static uint8_t tdoa_hann_ready = 0U;
 
@@ -256,6 +260,8 @@ static void mic_reset_state(void)
     tdoa_ema_init = 0U;
     tdoa_ema_angle_x10 = 0;
     tdoa_last_good_ms = 0U;
+    tdoa_last_proc_ms = 0U;
+    tdoa_last_result_ms = 0U;
     tdoa_hann_ready = 0U;
     memset(tdoa_acc_l, 0, sizeof(tdoa_acc_l));
     memset(tdoa_acc_r, 0, sizeof(tdoa_acc_r));
@@ -495,15 +501,17 @@ void mic_tdoa_enable(uint8_t enable)
 {
     tdoa_enabled = (enable != 0U) ? 1U : 0U;
     if (tdoa_enabled == 0U) {
+        tdoa_dbg.vad_pass = 0U;
         tdoa_dbg.valid = 0U;
         tdoa_track_valid = 0U;
         tdoa_ema_init = 0U;
+        tdoa_last_proc_ms = 0U;
+        tdoa_last_result_ms = 0U;
     }
 }
 
 void mic_tdoa_process(uint32_t now_ms)
 {
-    (void)now_ms;
     static int16_t cur_l[TDOA_HALF_N];
     static int16_t cur_r[TDOA_HALF_N];
     static int16_t frm_l[TDOA_FRAME_N];
@@ -518,6 +526,17 @@ void mic_tdoa_process(uint32_t now_ms)
         tdoa_dbg.valid = 0U;
         return;
     }
+
+    /* Stage-8: throttle heavy GCC-PHAT cadence to reduce CPU load. */
+    if ((now_ms - tdoa_last_proc_ms) < TDOA_PROCESS_PERIOD_MS) {
+        if ((tdoa_dbg.valid != 0U) && ((now_ms - tdoa_last_result_ms) > TDOA_STALE_INVALID_MS)) {
+            tdoa_dbg.valid = 0U;
+            tdoa_track_valid = 0U;
+            tdoa_ema_init = 0U;
+        }
+        return;
+    }
+    tdoa_last_proc_ms = now_ms;
 
     tdoa_prepare_hann();
 
@@ -678,6 +697,7 @@ void mic_tdoa_process(uint32_t now_ms)
 
         tdoa_dbg.alpha_deg_x10 = tdoa_ema_angle_x10;
         tdoa_dbg.valid = 1U;
+        tdoa_last_result_ms = now_ms;
     } else {
         tdoa_dbg.valid = 0U;
     }

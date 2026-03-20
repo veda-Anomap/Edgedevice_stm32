@@ -12,6 +12,7 @@ STM32F401RE 기반 엣지 디바이스 펌웨어입니다.
 - 5단계: AUTO에서 TDOA 각도 기반 PAN 연속 추종 + `detect_dir` 자동 fallback
 - 6단계: TDOA PAN 추종기 가변 이득 + 가속도 제한(부드러운 추종 프로파일)
 - 7단계: 물리 지연 한계 기반 lag 탐색 제한 + Hann 윈도우로 GCC-PHAT 안정화
+- 8단계: TDOA 연산 스케줄링 최적화(AUTO에서만 실행 + 20ms 주기 제한)
 - PAN/TILT 서보 제어 (AUTO/MANUAL)
 - AHT10 온습도 측정 + 이동 평균 필터
 - PCF8591 조도 측정
@@ -134,6 +135,8 @@ STM32F401RE 기반 엣지 디바이스 펌웨어입니다.
 - TDOA PAN 제어는 오차가 클 때 빠르고, 목표 근처에서 느려지는 가변 step 프로파일 적용
 - TDOA는 물리 지연 한계(`fs*d/c`) 기반으로 탐색 lag를 제한해 불가능한 후보를 제거
 - TDOA DFT 입력에 Hann 윈도우를 적용해 스펙트럼 누설/가짜 피크 영향을 완화
+- TDOA GCC-PHAT는 최소 20ms 주기로만 수행해 ControlTask CPU 점유를 낮춤
+- MANUAL 모드에서는 TDOA 연산을 스킵해 UART/수동 제어 응답성을 우선 확보
 - 칼만 필터/모터 추종 게인 분리는 후속 튜닝 단계
 - 모터 전원은 외부 5V 전원 + GND 공통을 권장
 

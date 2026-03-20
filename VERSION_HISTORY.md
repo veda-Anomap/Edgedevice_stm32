@@ -10,6 +10,44 @@
 
 ---
 
+## [v1.2.13] - 2026-03-20
+### TDOA 8단계: 연산 주기 제한 + 모드 기반 스케줄링 최적화
+
+변경 전 상태/문제
+- TDOA(GCC-PHAT) 경로가 ControlTask 주기마다 실행되어, AUTO/수동 여부와 관계없이 CPU를 지속 점유했음.
+- 수동 제어 중에도 불필요한 TDOA 연산이 돌아 UART/명령 응답성에 부담을 줄 수 있었음.
+- TDOA 결과가 오래 갱신되지 않아도 `valid` 상태가 잠시 남을 수 있었음.
+
+왜 바꿨는지
+- 실시간 제어에서 “필요할 때만 무거운 연산을 수행”하도록 스케줄링을 최적화해 전체 시스템 여유를 확보하기 위함.
+- MANUAL 우선 구간에서는 입력/제어 응답성을 높이고, AUTO에서는 안정된 주기로 TDOA를 유지하기 위함.
+
+무엇을 어떻게 바꿨는지
+- `Core/Src/mic.c`
+  - TDOA 주기 제한 상수 추가:
+    - `TDOA_PROCESS_PERIOD_MS=20`
+    - `TDOA_STALE_INVALID_MS=300`
+  - 런타임 상태 추가:
+    - `tdoa_last_proc_ms`, `tdoa_last_result_ms`
+  - `mic_tdoa_process(now)`에서 20ms 미만 호출은 heavy 연산을 스킵하도록 변경.
+  - 결과 갱신이 오래 없으면 `valid`를 자동 해제(stale invalidate).
+  - `mic_tdoa_enable(0)` 시 관련 타임스탬프/상태 초기화.
+- `Core/Src/app.c`
+  - `app_control_loop()`에서 TDOA 처리를 `MODE_AUTO`일 때만 호출하도록 변경.
+
+변경 후 기능/안정성 개선 효과
+- ControlTask의 평균 CPU 점유 감소(특히 MANUAL 모드).
+- 수동 조작/통신 처리 응답성 개선.
+- 오래된 TDOA 결과의 잔존으로 인한 잘못된 신뢰 상태가 줄어듦.
+
+영향 파일
+- `Core/Src/mic.c`
+- `Core/Src/app.c`
+- `README.md`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.12] - 2026-03-20
 ### TDOA 7단계: 물리 lag 제한 + Hann 윈도우 적용
 

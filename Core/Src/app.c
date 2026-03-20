@@ -647,7 +647,9 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
-    mic_tdoa_process(nowm);
+    if (current_mode == MODE_AUTO) {
+        mic_tdoa_process(nowm);
+    }
     static uint32_t last_tdoa_ok_ms = 0U;
 
     /* Process completed UART1 frames in ControlTask context */
