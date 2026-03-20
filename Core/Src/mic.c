@@ -1,4 +1,5 @@
 #include "mic.h"
+#include <string.h>
 
 /* Interleaved frame: [L, R, L, R, ...] */
 #define ADC_BUF_LEN 200U
@@ -31,6 +32,15 @@ extern I2S_HandleTypeDef hi2s2;
 #define NOISE_FREEZE_Q8 320U
 #define DIR_RATIO_TH_Q8 384U
 
+/* Stage-2 TDOA preprocess: VAD + 50% overlap frame */
+#define TDOA_HALF_N               64U
+#define TDOA_FRAME_N              (TDOA_HALF_N * 2U)
+#define TDOA_FS_HZ                16000U
+#define TDOA_LAG_MAX              8
+#define TDOA_VAD_MEANABS_TH       380U
+#define TDOA_CONF_TH_Q8           320U
+#define TDOA_COARSE_MAX_DEG_X10   750
+
 /* Shared states updated in ISR context */
 static volatile uint32_t lvlL = 0U, lvlR = 0U;
 static volatile uint32_t peakL = 0U, peakR = 0U;
@@ -42,6 +52,16 @@ static volatile uint8_t noise_ready = 0U;
 /* Stage-1 TDOA skeleton runtime states */
 static volatile uint8_t tdoa_enabled = 0U;
 static volatile mic_tdoa_debug_t tdoa_dbg = {0};
+static int16_t tdoa_acc_l[TDOA_HALF_N];
+static int16_t tdoa_acc_r[TDOA_HALF_N];
+static uint16_t tdoa_acc_idx = 0U;
+static int16_t tdoa_ready_l[TDOA_HALF_N];
+static int16_t tdoa_ready_r[TDOA_HALF_N];
+static volatile uint32_t tdoa_ready_seq = 0U;
+static uint32_t tdoa_seen_seq = 0U;
+static int16_t tdoa_prev_l[TDOA_HALF_N];
+static int16_t tdoa_prev_r[TDOA_HALF_N];
+static uint8_t tdoa_prev_valid = 0U;
 
 /* Direction state */
 static char detectLR = '-';
@@ -75,6 +95,34 @@ static inline uint32_t q8_ratio(uint32_t num, uint32_t den)
 static inline uint16_t u16_sat_u32(uint32_t v)
 {
     return (v > 65535U) ? 65535U : (uint16_t)v;
+}
+
+static inline uint32_t u32_sat_u64(uint64_t v)
+{
+    return (v > 0xFFFFFFFFULL) ? 0xFFFFFFFFU : (uint32_t)v;
+}
+
+static inline uint32_t u32_abs_i16(int16_t v)
+{
+    return (v >= 0) ? (uint32_t)v : (uint32_t)(-(int32_t)v);
+}
+
+static inline uint64_t u64_abs_i64(int64_t v)
+{
+    return (v >= 0) ? (uint64_t)v : (uint64_t)(-v);
+}
+
+static inline int32_t tdoa_tau_us_from_lag(int32_t lag)
+{
+    /* tau_us = lag / Fs * 1e6 */
+    return (int32_t)(((int64_t)lag * 1000000LL) / (int64_t)TDOA_FS_HZ);
+}
+
+static inline int32_t tdoa_coarse_angle_x10_from_lag(int32_t lag)
+{
+    if (lag > TDOA_LAG_MAX) lag = TDOA_LAG_MAX;
+    if (lag < -TDOA_LAG_MAX) lag = -TDOA_LAG_MAX;
+    return (lag * TDOA_COARSE_MAX_DEG_X10) / TDOA_LAG_MAX;
 }
 
 static inline void ring_push_pair(uint16_t *histL,
@@ -117,6 +165,16 @@ static void mic_reset_state(void)
     diff_dbg = 0U;
     tdoa_enabled = 0U;
     tdoa_dbg = (mic_tdoa_debug_t){0};
+    tdoa_acc_idx = 0U;
+    tdoa_ready_seq = 0U;
+    tdoa_seen_seq = 0U;
+    tdoa_prev_valid = 0U;
+    memset(tdoa_acc_l, 0, sizeof(tdoa_acc_l));
+    memset(tdoa_acc_r, 0, sizeof(tdoa_acc_r));
+    memset(tdoa_ready_l, 0, sizeof(tdoa_ready_l));
+    memset(tdoa_ready_r, 0, sizeof(tdoa_ready_r));
+    memset(tdoa_prev_l, 0, sizeof(tdoa_prev_l));
+    memset(tdoa_prev_r, 0, sizeof(tdoa_prev_r));
 
     sig_idx = sig_count = 0U;
     noise_idx = noise_count = 0U;
@@ -269,6 +327,17 @@ void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
 
         frame_u16[out++] = (uint16_t)(l16 + 32768);
         frame_u16[out++] = (uint16_t)(r16 + 32768);
+
+        /* Stage-2: collect fixed-size half block for overlap TDOA frame build */
+        tdoa_acc_l[tdoa_acc_idx] = (int16_t)l16;
+        tdoa_acc_r[tdoa_acc_idx] = (int16_t)r16;
+        tdoa_acc_idx++;
+        if (tdoa_acc_idx >= TDOA_HALF_N) {
+            memcpy(tdoa_ready_l, tdoa_acc_l, sizeof(tdoa_ready_l));
+            memcpy(tdoa_ready_r, tdoa_acc_r, sizeof(tdoa_ready_r));
+            tdoa_ready_seq++;
+            tdoa_acc_idx = 0U;
+        }
     }
     mic_process_interleaved_u16(frame_u16, out);
 }
@@ -345,26 +414,99 @@ void mic_tdoa_enable(uint8_t enable)
 void mic_tdoa_process(uint32_t now_ms)
 {
     (void)now_ms;
-
-    /* Stage-1: keep estimator disabled, expose only runtime placeholders. */
-    const uint32_t pL = peakL;
-    const uint32_t pR = peakR;
-    const uint32_t pMain = (pL > pR) ? pL : pR;
-    const uint32_t pSecond = (pL > pR) ? pR : pL;
-
-    tdoa_dbg.peak_main = u16_sat_u32(pMain);
-    tdoa_dbg.peak_second = u16_sat_u32(pSecond);
-    tdoa_dbg.confidence_q8 = u16_sat_u32(q8_ratio(pMain, pSecond + 1U));
-    tdoa_dbg.vad_pass = ((lvlL >= SOUND_TH) || (lvlR >= SOUND_TH)) ? 1U : 0U;
-
-    tdoa_dbg.lag_samples = 0;
-    tdoa_dbg.tau_us = 0;
-    tdoa_dbg.alpha_deg_x10 = 0;
-    tdoa_dbg.valid = 0U;
+    static int16_t cur_l[TDOA_HALF_N];
+    static int16_t cur_r[TDOA_HALF_N];
+    static int16_t frm_l[TDOA_FRAME_N];
+    static int16_t frm_r[TDOA_FRAME_N];
 
     if (tdoa_enabled == 0U) {
         tdoa_dbg.vad_pass = 0U;
+        tdoa_dbg.valid = 0U;
+        return;
     }
+
+    uint32_t seq0 = 0U;
+    uint32_t seq1 = 0U;
+    do {
+        seq0 = tdoa_ready_seq;
+        if (seq0 == tdoa_seen_seq) {
+            return; /* no new half block yet */
+        }
+        memcpy(cur_l, tdoa_ready_l, sizeof(cur_l));
+        memcpy(cur_r, tdoa_ready_r, sizeof(cur_r));
+        seq1 = tdoa_ready_seq;
+    } while (seq0 != seq1);
+    tdoa_seen_seq = seq1;
+
+    if (tdoa_prev_valid == 0U) {
+        memcpy(tdoa_prev_l, cur_l, sizeof(tdoa_prev_l));
+        memcpy(tdoa_prev_r, cur_r, sizeof(tdoa_prev_r));
+        tdoa_prev_valid = 1U;
+        tdoa_dbg.valid = 0U;
+        return;
+    }
+
+    memcpy(frm_l, tdoa_prev_l, sizeof(tdoa_prev_l));
+    memcpy(frm_r, tdoa_prev_r, sizeof(tdoa_prev_r));
+    memcpy(&frm_l[TDOA_HALF_N], cur_l, sizeof(cur_l));
+    memcpy(&frm_r[TDOA_HALF_N], cur_r, sizeof(cur_r));
+    memcpy(tdoa_prev_l, cur_l, sizeof(tdoa_prev_l));
+    memcpy(tdoa_prev_r, cur_r, sizeof(tdoa_prev_r));
+
+    uint32_t mean_abs = 0U;
+    for (uint32_t i = 0U; i < TDOA_FRAME_N; i++) {
+        mean_abs += u32_abs_i16(frm_l[i]);
+        mean_abs += u32_abs_i16(frm_r[i]);
+    }
+    mean_abs /= (2U * TDOA_FRAME_N);
+
+    tdoa_dbg.vad_pass = (mean_abs >= TDOA_VAD_MEANABS_TH) ? 1U : 0U;
+    if (tdoa_dbg.vad_pass == 0U) {
+        tdoa_dbg.valid = 0U;
+        tdoa_dbg.lag_samples = 0;
+        tdoa_dbg.tau_us = 0;
+        tdoa_dbg.alpha_deg_x10 = 0;
+        tdoa_dbg.peak_main = 0U;
+        tdoa_dbg.peak_second = 0U;
+        tdoa_dbg.confidence_q8 = 0U;
+        return;
+    }
+
+    int32_t best_lag = 0;
+    uint64_t best_peak = 0ULL;
+    uint64_t second_peak = 0ULL;
+
+    for (int32_t lag = -TDOA_LAG_MAX; lag <= TDOA_LAG_MAX; lag++) {
+        int64_t acc = 0;
+        for (int32_t i = 0; i < (int32_t)TDOA_FRAME_N; i++) {
+            const int32_t j = i - lag;
+            if ((j < 0) || (j >= (int32_t)TDOA_FRAME_N)) continue;
+            acc += (int32_t)frm_l[i] * (int32_t)frm_r[j];
+        }
+        const uint64_t peak = u64_abs_i64(acc);
+        if (peak > best_peak) {
+            second_peak = best_peak;
+            best_peak = peak;
+            best_lag = lag;
+        } else if (peak > second_peak) {
+            second_peak = peak;
+        }
+    }
+
+    tdoa_dbg.lag_samples = best_lag;
+    tdoa_dbg.tau_us = tdoa_tau_us_from_lag(best_lag);
+    tdoa_dbg.alpha_deg_x10 = tdoa_coarse_angle_x10_from_lag(best_lag);
+
+    /* compress peaks for log readability */
+    const uint32_t p_main = u32_sat_u64(best_peak >> 12);
+    const uint32_t p_second = u32_sat_u64(second_peak >> 12);
+    tdoa_dbg.peak_main = u16_sat_u32(p_main);
+    tdoa_dbg.peak_second = u16_sat_u32(p_second);
+
+    uint64_t conf64 = (best_peak << 8) / (second_peak + 1ULL);
+    if (conf64 > 65535ULL) conf64 = 65535ULL;
+    tdoa_dbg.confidence_q8 = (uint16_t)conf64;
+    tdoa_dbg.valid = (tdoa_dbg.confidence_q8 >= TDOA_CONF_TH_Q8) ? 1U : 0U;
 }
 
 uint8_t mic_tdoa_is_valid(void)

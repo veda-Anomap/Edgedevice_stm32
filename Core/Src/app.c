@@ -574,6 +574,7 @@ void app_init(void)
 {
     motor_ctrl_init(&htim3);
     mic_init();
+    mic_tdoa_enable(1U);
     aht10_init(&hi2c1, 2000U);
     pcf8591_init(&hi2c1, 200U);
 
@@ -643,6 +644,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
+    mic_tdoa_process(nowm);
 
     /* Process completed UART1 frames in ControlTask context */
     drain_protocol_queue(nowm);
@@ -688,6 +690,7 @@ void app_sensor_loop(void)
 
         if (current_mode == MODE_AUTO) {
             mic_debug_t dbg = {0};
+            mic_tdoa_debug_t tdbg = {0};
             aht10_data_t th;
             pcf8591_data_t light;
             char detect_dir = '-';
@@ -696,6 +699,7 @@ void app_sensor_loop(void)
                 mic_get_debug(&dbg);
                 detect_dir = dbg.detect_dir;
             }
+            mic_get_tdoa_debug(&tdbg);
             aht10_get_data(&th);
             pcf8591_get_data(&light);
 
@@ -704,17 +708,21 @@ void app_sensor_loop(void)
 
             printf("I2S_L:%4lu I2S_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
                    "PAN:%3lddeg TILT:%3lddeg | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu | "
+                   "TDOA[V:%u L:%ld C:%u] | "
                    "U1[Q:%lu IN:%lu FR:%lu DR:%lu ER:%lu O:%lu F:%lu N:%lu P:%lu "
                    "IV:%lu OV:%lu R:%lu RO:%lu RF:%lu]\r\n",
                    (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                    (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
                    detect_dir,
                    (long)pan_deg, (long)tilt_deg,
-                   temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
-                    (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
-                    (unsigned long)light.light_raw,
-                    (unsigned long)u1_q_used,
-                    (unsigned long)s_u1_isr_bytes,
+                    temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
+                     (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
+                     (unsigned long)light.light_raw,
+                     (unsigned)tdbg.valid,
+                     (long)tdbg.lag_samples,
+                     (unsigned)tdbg.confidence_q8,
+                     (unsigned long)u1_q_used,
+                     (unsigned long)s_u1_isr_bytes,
                     (unsigned long)s_u1_frames,
                     (unsigned long)s_u1_queue_drop,
                     (unsigned long)s_u1_err_total,

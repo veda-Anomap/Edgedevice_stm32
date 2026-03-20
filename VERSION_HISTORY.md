@@ -10,6 +10,47 @@
 
 ---
 
+## [v1.2.7] - 2026-03-20
+### TDOA 2단계: VAD + 50% 오버랩 프레임 + 코스 lag 추정
+
+변경 전 상태/문제
+- 1단계에서는 TDOA API/디버그 구조만 존재하고, 실제 프레임 전처리(VAD/오버랩)가 없어
+  짧은 이벤트(박수/클랩)가 프레임 경계에 걸릴 때 누락 가능성이 있었음.
+- 무의미한 저에너지 구간에도 동일 처리 경로를 타기 때문에 이후 단계 연산 확장 시 비효율 우려가 있었음.
+
+왜 바꿨는지
+- 3단계(GCC-PHAT) 전에, 실시간 입력을 안정적으로 프레임화하고
+  “유효한 소리 구간만 통과시키는” 전처리 체인을 먼저 고정하기 위함.
+
+무엇을 어떻게 바꿨는지
+- `Core/Src/mic.c`
+  - TDOA 전처리 매크로/버퍼 추가:
+    - half block 64샘플, overlap frame 128샘플(50% 오버랩)
+    - `TDOA_VAD_MEANABS_TH`, `TDOA_LAG_MAX` 등 stage-2 상수 추가
+  - I2S 콜백에서 clean sample을 64샘플 블록으로 축적 후 `ready` 시퀀스 갱신.
+  - `mic_tdoa_process()`에서:
+    - 최신 half block 수신 여부 확인
+    - 이전 half + 현재 half 결합으로 128 프레임 구성
+    - mean-abs 기반 VAD 적용
+    - 짧은 lag 범위 상관으로 코스 `lag/tau/confidence` 산출
+    - confidence 게이트(`TDOA_CONF_TH_Q8`)로 `valid` 설정
+- `Core/Src/app.c`
+  - `app_init()`에서 `mic_tdoa_enable(1)` 활성화
+  - `app_control_loop()`에서 `mic_tdoa_process(now)` 주기 호출
+  - AUTO 로그에 `TDOA[V/L/C]` 필드 추가
+
+변경 후 기능/안정성 개선 효과
+- 프레임 경계 누락이 줄어들고, 저에너지 구간은 VAD로 빠르게 걸러짐.
+- 아직 GCC-PHAT 전이지만, 입력 품질과 lag 안정성을 로그로 선검증 가능.
+- 기존 방향 제어(`detect_dir`) 경로는 유지되어 회귀 리스크를 낮춤.
+
+영향 파일
+- `Core/Src/mic.c`
+- `Core/Src/app.c`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.6] - 2026-03-20
 ### TDOA 1단계 스켈레톤 API/디버그 경로 추가
 
