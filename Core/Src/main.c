@@ -25,6 +25,8 @@
 /* USER CODE BEGIN Includes */
 #include "app.h"
 #include "ir_led.h"
+#include <stdio.h>
+#include <stdarg.h>
 
 /* USER CODE END Includes */
 
@@ -43,6 +45,7 @@
 #define SYS_MONITOR_PERIOD_MS     1000U
 /* With ~5s IWDG timeout, allow up to 3 missed checks and stop refresh on 4th miss */
 #define SYS_MONITOR_MISS_MAX         4U
+#define RPI_WDG_UART_LOG_ENABLE      1U
 
 /* USER CODE END PD */
 
@@ -161,6 +164,26 @@ int _write(int file, char *ptr, int len)
     (void)file;
     (void)ptr;
     return len;
+}
+
+static void rpi_wdg_uart2_log(const char *fmt, ...)
+{
+#if RPI_WDG_UART_LOG_ENABLE
+  char msg[160];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(msg, sizeof(msg), fmt, ap);
+  va_end(ap);
+
+  if (n <= 0) {
+    return;
+  }
+
+  uint16_t tx_len = (n < (int)sizeof(msg)) ? (uint16_t)n : (uint16_t)(sizeof(msg) - 1U);
+  (void)HAL_UART_Transmit(&huart2, (uint8_t *)msg, tx_len, 100U);
+#else
+  (void)fmt;
+#endif
 }
 /* USER CODE END 0 */
 
@@ -748,6 +771,12 @@ void StartDefaultTask(void *argument)
   rpi_wdg_wait_seconds_and_mark_alive(RPI_WDG_GRACE_SEC);
 
   GPIO_PinState last_level = rpi_wdg_sync_heartbeat_baseline();
+  uint32_t hb_edges = 0U;
+
+  rpi_wdg_uart2_log("[RPI-WDG] start: grace=%lus timeout=%lums cut=%lus\r\n",
+                    (unsigned long)RPI_WDG_GRACE_SEC,
+                    (unsigned long)RPI_HEARTBEAT_TIMEOUT_MS,
+                    (unsigned long)RPI_RELAY_CUT_SEC);
 
   for(;;)
   {
@@ -759,9 +788,15 @@ void StartDefaultTask(void *argument)
     if (cur_level != last_level) {
       last_level = cur_level;
       rpi_last_heartbeat_tick = now;
+      hb_edges++;
+      rpi_wdg_uart2_log("[RPI-HB] level=%lu edge=%lu link=OK\r\n",
+                        (unsigned long)((cur_level == GPIO_PIN_SET) ? 1U : 0U),
+                        (unsigned long)hb_edges);
     }
 
     if ((now - rpi_last_heartbeat_tick) > RPI_HEARTBEAT_TIMEOUT_MS) {
+      rpi_wdg_uart2_log("[RPI-HB] timeout=%lums -> link=LOST, relay cut\r\n",
+                        (unsigned long)RPI_HEARTBEAT_TIMEOUT_MS);
       /* Cut RPi power via relay to force reboot. */
       HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_SET);
 
@@ -771,11 +806,14 @@ void StartDefaultTask(void *argument)
       /* Restore relay (power back on). */
       HAL_GPIO_WritePin(RELAY_EN_GPIO_Port, RELAY_EN_Pin, GPIO_PIN_RESET);
       rpi_relay_reset_count++;
+      rpi_wdg_uart2_log("[RPI-WDG] relay restore done, reset_count=%lu, grace wait\r\n",
+                        (unsigned long)rpi_relay_reset_count);
 
       /* Wait for RPi reboot grace period after power restore. */
       rpi_wdg_wait_seconds_and_mark_alive(RPI_WDG_GRACE_SEC);
 
       last_level = rpi_wdg_sync_heartbeat_baseline();
+      rpi_wdg_uart2_log("[RPI-WDG] grace done, heartbeat monitoring restart\r\n");
     }
 
     osDelay(RPI_WDG_POLL_MS);
