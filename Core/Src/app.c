@@ -1,4 +1,4 @@
-#include "app.h"
+﻿#include "app.h"
 #include "mic.h"
 #include "motor_ctrl.h"
 #include "aht10.h"
