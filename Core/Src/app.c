@@ -31,6 +31,7 @@ static uint8_t rx_data_rpi = 0U;
 #define STATUS_REPLY_MIN_INTERVAL_MS 100U
 #define MANUAL_CMD_MIN_INTERVAL_MS 90U
 #define TDOA_FALLBACK_HOLD_MS 250U
+#define AUTO_VIEW_HOLD_MS 5000U
 #define UART1_RX_MIRROR_TO_UART2 1U
 #define UART1_MIRROR_PAYLOAD_MAX 96U
 
@@ -652,10 +653,15 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
+    static uint32_t last_tdoa_ok_ms = 0U;
+    static uint32_t auto_hold_until_ms = 0U;
+    static int32_t auto_hold_angle_x10 = 0;
+    static char auto_hold_dir = '-';
+    static uint8_t auto_hold_src = 0U; /* 0:none, 1:tdoa, 2:detect_dir */
+
     if (current_mode == MODE_AUTO) {
         mic_tdoa_process(nowm);
     }
-    static uint32_t last_tdoa_ok_ms = 0U;
 
     /* Process completed UART1 frames in ControlTask context */
     drain_protocol_queue(nowm);
@@ -671,13 +677,29 @@ void app_control_loop(void)
     drain_control_queue(nowm);
 
     if (current_mode == MODE_AUTO) {
+        if ((auto_hold_src != 0U) && ((int32_t)(nowm - auto_hold_until_ms) < 0)) {
+            s_auto_ctrl_src = 'H';
+            if (auto_hold_src == 1U) {
+                motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
+            } else if (auto_hold_src == 2U) {
+                motor_ctrl_process(nowm, auto_hold_dir);
+            }
+            return;
+        }
+
+        auto_hold_src = 0U;
+        auto_hold_dir = '-';
+
         mic_tdoa_debug_t tdbg = {0};
         mic_get_tdoa_debug(&tdbg);
 
         if (tdbg.valid != 0U) {
             last_tdoa_ok_ms = nowm;
             s_auto_ctrl_src = 'T';
-            motor_ctrl_track_pan_tdoa(nowm, tdbg.alpha_deg_x10);
+            auto_hold_angle_x10 = tdbg.alpha_deg_x10;
+            auto_hold_src = 1U;
+            auto_hold_until_ms = nowm + AUTO_VIEW_HOLD_MS;
+            motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
         } else if ((nowm - last_tdoa_ok_ms) <= TDOA_FALLBACK_HOLD_MS) {
             s_auto_ctrl_src = 'T';
             /* keep last tdoa-tracked position for a short hold window */
@@ -686,10 +708,18 @@ void app_control_loop(void)
             const uint32_t lock_until_ms = motor_ctrl_get_lock_until_ms();
             const char detect_dir = mic_process(nowm, lock_until_ms);
             motor_ctrl_process(nowm, detect_dir);
+            if ((detect_dir == 'L') || (detect_dir == 'R')) {
+                auto_hold_dir = detect_dir;
+                auto_hold_src = 2U;
+                auto_hold_until_ms = nowm + AUTO_VIEW_HOLD_MS;
+            }
         } else {
             s_auto_ctrl_src = '-';
         }
     } else {
+        auto_hold_src = 0U;
+        auto_hold_dir = '-';
+        auto_hold_until_ms = 0U;
         s_auto_ctrl_src = 'M';
         motor_ctrl_manual_process(nowm);
     }
