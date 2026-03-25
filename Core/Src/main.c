@@ -45,7 +45,7 @@
 #define SYS_MONITOR_PERIOD_MS     1000U
 /* With ~5s IWDG timeout, allow up to 3 missed checks and stop refresh on 4th miss */
 #define SYS_MONITOR_MISS_MAX         4U
-#define RPI_WDG_UART_LOG_ENABLE      1U
+#define RPI_WDG_UART_LOG_ENABLE      0U
 
 /* USER CODE END PD */
 
@@ -151,9 +151,10 @@ void StartSystemMonitorTask(void *argument);
 /* USER CODE BEGIN 0 */
 int _write(int file, char *ptr, int len)
 {
-    /* UART2 debug print path is currently disabled */
     (void)file;
-    (void)ptr;
+    if ((ptr != NULL) && (len > 0)) {
+      (void)HAL_UART_Transmit(&huart2, (uint8_t *)ptr, (uint16_t)len, 100U);
+    }
     return len;
 }
 /* USER CODE END 0 */

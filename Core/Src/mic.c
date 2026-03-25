@@ -38,7 +38,7 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_FRAME_N              (TDOA_HALF_N * 2U)
 #define TDOA_FS_HZ                16000U
 #define TDOA_LAG_MAX              8
-#define TDOA_VAD_MEANABS_TH       380U
+#define TDOA_VAD_MEANABS_TH       260U
 #define TDOA_COARSE_MAX_DEG_X10   750
 #define TDOA_MIC_DISTANCE_MM      120.0f
 #define TDOA_SOUND_SPEED_MM_S     343000.0f
@@ -48,8 +48,8 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_PROCESS_PERIOD_MS    20U
 #define TDOA_STALE_INVALID_MS     300U
 /* Stage-4 stabilization: confidence hysteresis + hold + EMA + slew limit */
-#define TDOA_CONF_ON_Q8           384U
-#define TDOA_CONF_OFF_Q8          300U
+#define TDOA_CONF_ON_Q8           336U
+#define TDOA_CONF_OFF_Q8          272U
 #define TDOA_VALID_HOLD_MS        120U
 #define TDOA_EMA_ALPHA_Q8         64U
 #define TDOA_MAX_STEP_DEG_X10     80
@@ -159,57 +159,92 @@ static void tdoa_prepare_hann(void)
     tdoa_hann_ready = 1U;
 }
 
-static void tdoa_dft_real_128(const int16_t *x, const float *win, float *xr, float *xi)
+static void tdoa_fft_c128_inplace(float *xr, float *xi, uint8_t inverse)
 {
     const uint32_t N = TDOA_FRAME_N;
-    for (uint32_t k = 0U; k < N; k++) {
-        float sum_r = 0.0f;
-        float sum_i = 0.0f;
-        float wr = 1.0f;
-        float wi = 0.0f;
-        const float ang = -2.0f * TDOA_PI_F * (float)k / (float)N;
-        const float sr = cosf(ang);
-        const float si = sinf(ang);
+    uint32_t j = 0U;
 
-        for (uint32_t n = 0U; n < N; n++) {
-            float xn = (float)x[n];
-            if (win != NULL) {
-                xn *= win[n];
-            }
-            sum_r += xn * wr;
-            sum_i += xn * wi;
-
-            const float nwr = wr * sr - wi * si;
-            const float nwi = wr * si + wi * sr;
-            wr = nwr;
-            wi = nwi;
+    /* bit-reversal permutation */
+    for (uint32_t i = 1U; i < N; i++) {
+        uint32_t bit = (N >> 1U);
+        while (j & bit) {
+            j ^= bit;
+            bit >>= 1U;
         }
-        xr[k] = sum_r;
-        xi[k] = sum_i;
+        j ^= bit;
+        if (i < j) {
+            const float tr = xr[i];
+            const float ti = xi[i];
+            xr[i] = xr[j];
+            xi[i] = xi[j];
+            xr[j] = tr;
+            xi[j] = ti;
+        }
+    }
+
+    /* radix-2 Cooley-Tukey FFT (O(N log N)) */
+    for (uint32_t len = 2U; len <= N; len <<= 1U) {
+        const float ang = (inverse != 0U ? 2.0f : -2.0f) * TDOA_PI_F / (float)len;
+        const float wlen_r = cosf(ang);
+        const float wlen_i = sinf(ang);
+        const uint32_t half = (len >> 1U);
+
+        for (uint32_t i = 0U; i < N; i += len) {
+            float wr = 1.0f;
+            float wi = 0.0f;
+            for (uint32_t k = 0U; k < half; k++) {
+                const uint32_t u = i + k;
+                const uint32_t v = u + half;
+
+                const float tr = (wr * xr[v]) - (wi * xi[v]);
+                const float ti = (wr * xi[v]) + (wi * xr[v]);
+
+                const float ur = xr[u];
+                const float ui = xi[u];
+
+                xr[u] = ur + tr;
+                xi[u] = ui + ti;
+                xr[v] = ur - tr;
+                xi[v] = ui - ti;
+
+                const float nwr = (wr * wlen_r) - (wi * wlen_i);
+                wi = (wr * wlen_i) + (wi * wlen_r);
+                wr = nwr;
+            }
+        }
+    }
+
+    if (inverse != 0U) {
+        const float inv_n = 1.0f / (float)N;
+        for (uint32_t i = 0U; i < N; i++) {
+            xr[i] *= inv_n;
+            xi[i] *= inv_n;
+        }
     }
 }
 
-static float tdoa_phat_corr_at_lag(const float *gr, const float *gi, int32_t lag)
+static void tdoa_fft_real_windowed_128(const int16_t *x, const float *win, float *xr, float *xi)
 {
     const uint32_t N = TDOA_FRAME_N;
-    float acc = 0.0f;
-    float wr = 1.0f;
-    float wi = 0.0f;
-    const float ang = 2.0f * TDOA_PI_F * (float)lag / (float)N;
-    const float sr = cosf(ang);
-    const float si = sinf(ang);
-
-    for (uint32_t k = 0U; k < N; k++) {
-        /* real{ Gphat[k] * exp(+j*2*pi*k*lag/N) } */
-        acc += (gr[k] * wr - gi[k] * wi);
-
-        const float nwr = wr * sr - wi * si;
-        const float nwi = wr * si + wi * sr;
-        wr = nwr;
-        wi = nwi;
+    for (uint32_t n = 0U; n < N; n++) {
+        float xn = (float)x[n];
+        if (win != NULL) {
+            xn *= win[n];
+        }
+        xr[n] = xn;
+        xi[n] = 0.0f;
     }
+    tdoa_fft_c128_inplace(xr, xi, 0U);
+}
 
-    return acc / (float)N;
+static void tdoa_ifft_phat_to_corr_abs(float *gr, float *gi, float *corr_abs)
+{
+    tdoa_fft_c128_inplace(gr, gi, 1U);
+
+    for (int32_t lag = -TDOA_LAG_MAX; lag <= TDOA_LAG_MAX; lag++) {
+        const uint32_t idx = (lag >= 0) ? (uint32_t)lag : (uint32_t)(TDOA_FRAME_N + lag);
+        corr_abs[lag + TDOA_LAG_MAX] = fabsf(gr[idx]);
+    }
 }
 
 static inline void ring_push_pair(uint16_t *histL,
@@ -411,7 +446,11 @@ static void mic_on_i2s_rx_segment(const uint16_t *src, uint32_t halfword_len)
         l16 -= dc_offset_l;
         r16 -= dc_offset_r;
 
-        /* Gate very small values to suppress white-noise floor jitter. */
+        /* Keep ungated samples for TDOA phase path. */
+        int32_t l16_tdoa = l16;
+        int32_t r16_tdoa = r16;
+
+        /* Gate very small values only for level/direction envelope path. */
         if (l16 > -NOISE_GATE_TH && l16 < NOISE_GATE_TH) l16 = 0;
         if (r16 > -NOISE_GATE_TH && r16 < NOISE_GATE_TH) r16 = 0;
 
@@ -419,13 +458,17 @@ static void mic_on_i2s_rx_segment(const uint16_t *src, uint32_t halfword_len)
         if (l16 < -32768) l16 = -32768;
         if (r16 > 32767) r16 = 32767;
         if (r16 < -32768) r16 = -32768;
+        if (l16_tdoa > 32767) l16_tdoa = 32767;
+        if (l16_tdoa < -32768) l16_tdoa = -32768;
+        if (r16_tdoa > 32767) r16_tdoa = 32767;
+        if (r16_tdoa < -32768) r16_tdoa = -32768;
 
         frame_u16[out++] = (uint16_t)(l16 + 32768);
         frame_u16[out++] = (uint16_t)(r16 + 32768);
 
         /* Stage-2: collect fixed-size half block for overlap TDOA frame build */
-        tdoa_acc_l[tdoa_acc_idx] = (int16_t)l16;
-        tdoa_acc_r[tdoa_acc_idx] = (int16_t)r16;
+        tdoa_acc_l[tdoa_acc_idx] = (int16_t)l16_tdoa;
+        tdoa_acc_r[tdoa_acc_idx] = (int16_t)r16_tdoa;
         tdoa_acc_idx++;
         if (tdoa_acc_idx >= TDOA_HALF_N) {
             memcpy(tdoa_ready_l, tdoa_acc_l, sizeof(tdoa_ready_l));
@@ -600,9 +643,9 @@ void mic_tdoa_process(uint32_t now_ms)
         return;
     }
 
-    /* Stage-3: lightweight GCC-PHAT pipeline (DFT -> PHAT normalize -> lag scan) */
-    tdoa_dft_real_128(frm_l, tdoa_hann, x1r, x1i);
-    tdoa_dft_real_128(frm_r, tdoa_hann, x2r, x2i);
+    /* Stage-3: GCC-PHAT pipeline (FFT -> PHAT normalize -> IFFT -> lag scan) */
+    tdoa_fft_real_windowed_128(frm_l, tdoa_hann, x1r, x1i);
+    tdoa_fft_real_windowed_128(frm_r, tdoa_hann, x2r, x2i);
 
     const int32_t lag_max = tdoa_effective_lag_max();
     for (uint32_t k = 0U; k < TDOA_FRAME_N; k++) {
@@ -614,14 +657,14 @@ void mic_tdoa_process(uint32_t now_ms)
         gi[k] = ci / mag;
     }
 
+    tdoa_ifft_phat_to_corr_abs(gr, gi, corr_abs);
+
     int32_t best_lag = 0;
-    float best_peak = -1.0f;
+    float best_peak = 0.0f;
     float second_peak = 0.0f;
 
     for (int32_t lag = -lag_max; lag <= lag_max; lag++) {
-        const float c = tdoa_phat_corr_at_lag(gr, gi, lag);
-        const float a = fabsf(c);
-        corr_abs[lag + TDOA_LAG_MAX] = a;
+        const float a = corr_abs[lag + TDOA_LAG_MAX];
 
         if (a > best_peak) {
             second_peak = best_peak;

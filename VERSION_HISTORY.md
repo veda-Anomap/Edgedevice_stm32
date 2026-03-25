@@ -10,6 +10,45 @@
 
 ---
 
+## [v1.2.14] - 2026-03-25
+### TDOA 9단계: FFT/IFFT 기반 GCC-PHAT 전환 + 게이트 경로 분리
+
+변경 전 상태/문제
+- TDOA Stage-3 경로가 128-point 직접 DFT + lag별 상관 직접합산(`O(N^2)`) 구조라, 연산량이 크고 주기 부하가 높았음.
+- I2S 입력에서 하드 노이즈 게이트(`|x|<TH => 0`)를 TDOA 입력에도 동일 적용해, 위상 기반 상관에서 불연속 아티팩트가 생길 여지가 있었음.
+
+왜 바꿨는지
+- TDOA 추정의 핵심 연산을 더 가볍고 안정적인 주파수 도메인 파이프라인으로 바꿔 실시간 여유를 확보하기 위함.
+- 레벨 기반 방향검출(`detect_dir`)에 필요한 게이트는 유지하되, GCC-PHAT 위상 경로는 원 신호를 보존해 피크 왜곡을 줄이기 위함.
+
+무엇을 어떻게 바꿨는지
+- `Core/Src/mic.c`
+  - 직접 DFT/lag합산 함수를 제거하고, `radix-2 FFT/IFFT (128)` 기반 함수 추가:
+    - `tdoa_fft_c128_inplace()`
+    - `tdoa_fft_real_windowed_128()`
+    - `tdoa_ifft_phat_to_corr_abs()`
+  - Stage-3 계산 흐름 변경:
+    - `FFT(X1), FFT(X2)` -> `G = X1*conj(X2)` -> `PHAT normalize` -> `IFFT` -> lag 구간 피크 탐색
+  - I2S 샘플 처리 경로 분리:
+    - `l16/r16`(게이트 적용) -> 기존 레벨/방향검출 경로(`mic_process_interleaved_u16`)
+    - `l16_tdoa/r16_tdoa`(ungated) -> TDOA half-block 누적 버퍼
+  - TDOA 버퍼 저장값은 ungated 샘플 사용하도록 변경.
+- `README.md`
+  - TDOA 9단계(FFT/IFFT 전환 + 게이트 분리) 반영.
+  - TDOA 동작 주의사항에 `O(N log N)` 전환/게이트 분리 정책 추가.
+
+변경 후 기능/안정성 개선 효과
+- TDOA 핵심 연산 복잡도가 `O(N^2)`에서 `O(N log N)`로 낮아져 주기 부하가 완화됨.
+- 위상 경로 신호 보존으로 GCC-PHAT 피크 품질 저하 가능성이 줄어듦.
+- `detect_dir` 경로의 노이즈 억제 특성은 유지하면서 TDOA 추정 신뢰도 개선 여지 확보.
+
+영향 파일
+- `Core/Src/mic.c`
+- `README.md`
+- `VERSION_HISTORY.md`
+
+---
+
 ## [v1.2.13] - 2026-03-20
 ### TDOA 8단계: 연산 주기 제한 + 모드 기반 스케줄링 최적화
 

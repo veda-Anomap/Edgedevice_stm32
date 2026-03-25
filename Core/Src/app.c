@@ -27,12 +27,14 @@ static uint8_t rx_data_rpi = 0U;
 
 #define PROTO_MAX_PAYLOAD 192U
 #define PROTO_FRAME_QUEUE_LEN 8U
+#define PROTO_TX_QUEUE_LEN 8U
+#define PROTO_TX_FRAME_MAX (5U + PROTO_MAX_PAYLOAD)
 #define PROTO_RX_TIMEOUT_MS 100U
 #define STATUS_REPLY_MIN_INTERVAL_MS 100U
 #define MANUAL_CMD_MIN_INTERVAL_MS 90U
 #define TDOA_FALLBACK_HOLD_MS 250U
-#define AUTO_VIEW_HOLD_MS 5000U
-#define UART1_RX_MIRROR_TO_UART2 1U
+#define AUTO_VIEW_HOLD_MS 1000U
+#define UART1_RX_MIRROR_TO_UART2 0U
 #define UART1_MIRROR_PAYLOAD_MAX 96U
 
 typedef enum {
@@ -57,10 +59,21 @@ typedef struct {
     uint8_t payload[PROTO_MAX_PAYLOAD];
 } proto_frame_t;
 
+typedef struct {
+    uint16_t len;
+    uint8_t data[PROTO_TX_FRAME_MAX];
+} proto_tx_frame_t;
+
 static proto_frame_t s_frame_q[PROTO_FRAME_QUEUE_LEN];
 static volatile uint8_t s_frame_q_head = 0U;
 static volatile uint8_t s_frame_q_tail = 0U;
 static volatile uint8_t s_frame_q_count = 0U;
+static proto_tx_frame_t s_tx_q[PROTO_TX_QUEUE_LEN];
+static volatile uint8_t s_tx_q_head = 0U;
+static volatile uint8_t s_tx_q_tail = 0U;
+static volatile uint8_t s_tx_q_count = 0U;
+static volatile uint8_t s_tx_busy = 0U;
+static volatile uint8_t s_tx_need_kick = 0U;
 static volatile uint8_t s_status_reply_pending = 0U;
 static volatile uint32_t s_last_status_reply_ms = 0U;
 
@@ -82,6 +95,8 @@ static volatile uint32_t s_u1_err_pe = 0U;
 static volatile uint32_t s_u1_rearm_fail = 0U;
 static volatile uint32_t s_u1_recover_ok = 0U;
 static volatile uint32_t s_u1_recover_fail = 0U;
+static volatile uint32_t s_u1_tx_drop = 0U;
+static volatile uint32_t s_u1_tx_it_fail = 0U;
 static volatile char s_auto_ctrl_src = 'D'; /* D: detect_dir, T: tdoa */
 
 /* Coalesce manual move bursts: keep only the latest movement command */
@@ -133,33 +148,74 @@ static int32_t pwm_to_deg(uint16_t pwm, uint16_t min_pwm, uint16_t max_pwm)
     return ((int32_t)(pwm - min_pwm) * 180) / (int32_t)(max_pwm - min_pwm);
 }
 
+static uint8_t proto_uart1_enqueue_frame(uint8_t cmd, const char *json)
+{
+    if (json == NULL) return 0U;
+
+    const uint32_t payload_len = (uint32_t)strlen(json);
+    if (payload_len > PROTO_MAX_PAYLOAD) {
+        s_u1_tx_drop++;
+        return 0U;
+    }
+
+    proto_tx_frame_t frame = {0};
+    frame.data[0] = cmd;
+    frame.data[1] = (uint8_t)((payload_len >> 24) & 0xFFU);
+    frame.data[2] = (uint8_t)((payload_len >> 16) & 0xFFU);
+    frame.data[3] = (uint8_t)((payload_len >> 8) & 0xFFU);
+    frame.data[4] = (uint8_t)(payload_len & 0xFFU);
+    if (payload_len > 0U) {
+        memcpy(&frame.data[5], json, payload_len);
+    }
+    frame.len = (uint16_t)(5U + payload_len);
+
+    uint8_t queued = 0U;
+    __disable_irq();
+    if (s_tx_q_count < PROTO_TX_QUEUE_LEN) {
+        s_tx_q[s_tx_q_head] = frame;
+        s_tx_q_head = (uint8_t)((s_tx_q_head + 1U) % PROTO_TX_QUEUE_LEN);
+        s_tx_q_count++;
+        s_tx_need_kick = 1U;
+        queued = 1U;
+    } else {
+        s_u1_tx_drop++;
+    }
+    __enable_irq();
+
+    return queued;
+}
+
+static void proto_uart1_tx_poll(void)
+{
+    if (s_tx_busy != 0U) return;
+    if (s_tx_need_kick == 0U) return;
+
+    uint8_t *tx_ptr = NULL;
+    uint16_t tx_len = 0U;
+
+    __disable_irq();
+    if (s_tx_q_count > 0U) {
+        tx_ptr = s_tx_q[s_tx_q_tail].data;
+        tx_len = s_tx_q[s_tx_q_tail].len;
+    } else {
+        s_tx_need_kick = 0U;
+    }
+    __enable_irq();
+
+    if ((tx_ptr == NULL) || (tx_len == 0U)) return;
+
+    if (HAL_UART_Transmit_IT(&huart1, tx_ptr, tx_len) == HAL_OK) {
+        s_tx_busy = 1U;
+    } else {
+        s_u1_tx_it_fail++;
+        s_tx_need_kick = 1U;
+    }
+}
+
 static void proto_uart1_send_packet(uint8_t cmd, const char *json)
 {
-    if (json == NULL) return;
-
-    const uint32_t len = (uint32_t)strlen(json);
-    uint8_t header[5];
-    header[0] = cmd;
-    header[1] = (uint8_t)((len >> 24) & 0xFFU);
-    header[2] = (uint8_t)((len >> 16) & 0xFFU);
-    header[3] = (uint8_t)((len >> 8) & 0xFFU);
-    header[4] = (uint8_t)(len & 0xFFU);
-
-    uint8_t locked = 0U;
-    if ((uart_tx_mutexHandle != NULL) && (osKernelGetState() == osKernelRunning)) {
-        if (osMutexAcquire(uart_tx_mutexHandle, osWaitForever) == osOK) {
-            locked = 1U;
-        }
-    }
-
-    (void)HAL_UART_Transmit(&huart1, header, sizeof(header), 100U);
-    if (len > 0U) {
-        (void)HAL_UART_Transmit(&huart1, (uint8_t *)json, len, 100U);
-    }
-
-    if (locked != 0U) {
-        (void)osMutexRelease(uart_tx_mutexHandle);
-    }
+    (void)proto_uart1_enqueue_frame(cmd, json);
+    proto_uart1_tx_poll();
 }
 
 static void proto_send_status_packet(void)
@@ -587,7 +643,7 @@ void app_init(void)
     /* RPi protocol RX interrupt (frame by frame, 1 byte feed) */
     (void)HAL_UART_Receive_IT(&huart1, &rx_data_rpi, 1);
 
-    printf("Starting DMA Audio System...\r\n");
+    /* UART2 direction-only monitor mode: boot banner disabled */
 }
 
 #ifdef HAL_ADC_MODULE_ENABLED
@@ -631,6 +687,20 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
     }
 }
 
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart1) {
+        __disable_irq();
+        if (s_tx_q_count > 0U) {
+            s_tx_q_tail = (uint8_t)((s_tx_q_tail + 1U) % PROTO_TX_QUEUE_LEN);
+            s_tx_q_count--;
+        }
+        s_tx_busy = 0U;
+        s_tx_need_kick = (s_tx_q_count > 0U) ? 1U : 0U;
+        __enable_irq();
+    }
+}
+
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart1) {
@@ -662,6 +732,9 @@ void app_control_loop(void)
     if (current_mode == MODE_AUTO) {
         mic_tdoa_process(nowm);
     }
+
+    /* Non-blocking UART1 TX queue progression */
+    proto_uart1_tx_poll();
 
     /* Process completed UART1 frames in ControlTask context */
     drain_protocol_queue(nowm);
@@ -728,94 +801,59 @@ void app_control_loop(void)
 void app_sensor_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
-    const uint16_t pan_pwm = motor_ctrl_get_pan_pwm();
-    const uint16_t tilt_pwm = motor_ctrl_get_tilt_pwm();
-    const int32_t pan_deg = pwm_to_deg(pan_pwm, PAN_LEFT, PAN_RIGHT);
-    const int32_t tilt_deg = pwm_to_deg(tilt_pwm, TILT_UP, TILT_DOWN);
 
     aht10_process(nowm);
     pcf8591_process(nowm);
 
     static uint32_t last_dbg = 0U;
     if (nowm - last_dbg >= 500U) {
-        uint32_t u1_q_used = 0U;
-        if (uart_rx_queueHandle != NULL) {
-            u1_q_used = osMessageQueueGetCount(uart_rx_queueHandle);
+        mic_debug_t dbg = {0};
+        mic_tdoa_debug_t tdbg = {0};
+        aht10_data_t th = {0};
+        pcf8591_data_t light = {0};
+        const uint16_t pan_pwm = motor_ctrl_get_pan_pwm();
+        const uint16_t tilt_pwm = motor_ctrl_get_tilt_pwm();
+        const int32_t pan_deg = pwm_to_deg(pan_pwm, PAN_LEFT, PAN_RIGHT);
+        const int32_t tilt_deg = pwm_to_deg(tilt_pwm, TILT_UP, TILT_DOWN);
+        char detect_dir = '-';
+        char tdoa_dir = '-';
+
+        if (mic_is_calibrated()) {
+            mic_get_debug(&dbg);
+            detect_dir = dbg.detect_dir;
         }
-
-        if (current_mode == MODE_AUTO) {
-            mic_debug_t dbg = {0};
-            mic_tdoa_debug_t tdbg = {0};
-            aht10_data_t th;
-            pcf8591_data_t light;
-            char detect_dir = '-';
-
-            if (mic_is_calibrated()) {
-                mic_get_debug(&dbg);
-                detect_dir = dbg.detect_dir;
+        mic_get_tdoa_debug(&tdbg);
+        if (tdbg.valid != 0U) {
+            if (tdbg.alpha_deg_x10 > 30) {
+                tdoa_dir = 'R';
+            } else if (tdbg.alpha_deg_x10 < -30) {
+                tdoa_dir = 'L';
+            } else {
+                tdoa_dir = 'C';
             }
-            mic_get_tdoa_debug(&tdbg);
-            aht10_get_data(&th);
-            pcf8591_get_data(&light);
-
-            const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
-            const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
-
-            printf("I2S_L:%4lu I2S_R:%4lu | FINAL_L:%4lu FINAL_R:%4lu | DIR:%c | "
-                   "PAN:%3lddeg TILT:%3lddeg | SRC:%c | T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu | "
-                   "TDOA[V:%u L:%ld T:%ldus A:%ld.%01lddeg C:%u] | "
-                   "U1[Q:%lu IN:%lu FR:%lu DR:%lu ER:%lu O:%lu F:%lu N:%lu P:%lu "
-                   "IV:%lu OV:%lu R:%lu RO:%lu RF:%lu]\r\n",
-                   (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
-                    (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
-                    detect_dir,
-                    (long)pan_deg, (long)tilt_deg,
-                     s_auto_ctrl_src,
-                     temp_sign, (long)(temp_abs / 100), (long)(temp_abs % 100),
-                      (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
-                      (unsigned long)light.light_raw,
-                     (unsigned)tdbg.valid,
-                     (long)tdbg.lag_samples,
-                     (long)tdbg.tau_us,
-                     (long)(tdbg.alpha_deg_x10 / 10),
-                     (long)((tdbg.alpha_deg_x10 < 0) ? -(tdbg.alpha_deg_x10 % 10) : (tdbg.alpha_deg_x10 % 10)),
-                     (unsigned)tdbg.confidence_q8,
-                     (unsigned long)u1_q_used,
-                     (unsigned long)s_u1_isr_bytes,
-                    (unsigned long)s_u1_frames,
-                    (unsigned long)s_u1_queue_drop,
-                    (unsigned long)s_u1_err_total,
-                    (unsigned long)s_u1_err_ore,
-                    (unsigned long)s_u1_err_fe,
-                    (unsigned long)s_u1_err_ne,
-                    (unsigned long)s_u1_err_pe,
-                    (unsigned long)s_u1_proto_invalid,
-                    (unsigned long)s_u1_proto_oversize,
-                    (unsigned long)s_u1_rearm_fail,
-                    (unsigned long)s_u1_recover_ok,
-                    (unsigned long)s_u1_recover_fail);
-        } else {
-            pcf8591_data_t light;
-            pcf8591_get_data(&light);
-            printf("MODE:MANUAL | PAN:%3lddeg TILT:%3lddeg | PAN_PWM:%u TILT_PWM:%u | LIGHT:%3lu | "
-                   "U1[Q:%lu IN:%lu FR:%lu DR:%lu ER:%lu O:%lu F:%lu N:%lu P:%lu "
-                   "IV:%lu OV:%lu R:%lu RO:%lu RF:%lu]\r\n",
-                   (long)pan_deg, (long)tilt_deg, pan_pwm, tilt_pwm, (unsigned long)light.light_raw,
-                   (unsigned long)u1_q_used,
-                   (unsigned long)s_u1_isr_bytes,
-                   (unsigned long)s_u1_frames,
-                   (unsigned long)s_u1_queue_drop,
-                   (unsigned long)s_u1_err_total,
-                   (unsigned long)s_u1_err_ore,
-                   (unsigned long)s_u1_err_fe,
-                   (unsigned long)s_u1_err_ne,
-                   (unsigned long)s_u1_err_pe,
-                   (unsigned long)s_u1_proto_invalid,
-                   (unsigned long)s_u1_proto_oversize,
-                   (unsigned long)s_u1_rearm_fail,
-                   (unsigned long)s_u1_recover_ok,
-                   (unsigned long)s_u1_recover_fail);
         }
+        aht10_get_data(&th);
+        pcf8591_get_data(&light);
+
+        const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
+        const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
+
+        /* LOC_A is computed from tau via alpha = asin(tau/tau_max) in mic_tdoa_process(). */
+        printf("I2S_L:%5lu I2S_R:%5lu | FINAL_L:%4lu FINAL_R:%4lu | DET:%c TDIR:%c TV:%u CONF:%u | "
+               "PAN:%3lddeg TILT:%3lddeg | LOC_A:%+ld.%01lddeg TAU:%+ldus LAG:%+ld | "
+               "T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu\r\n",
+               (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
+               (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
+               detect_dir, tdoa_dir, (unsigned)tdbg.valid, (unsigned)tdbg.confidence_q8,
+               (long)pan_deg, (long)tilt_deg,
+               (long)(tdbg.alpha_deg_x10 / 10),
+               (long)((tdbg.alpha_deg_x10 < 0) ? -(tdbg.alpha_deg_x10 % 10) : (tdbg.alpha_deg_x10 % 10)),
+               (long)tdbg.tau_us,
+               (long)tdbg.lag_samples,
+               temp_sign,
+               (long)(temp_abs / 100), (long)(temp_abs % 100),
+               (unsigned long)(th.humidity_rh_x100 / 100U), (unsigned long)(th.humidity_rh_x100 % 100U),
+               (unsigned long)light.light_raw);
         last_dbg = nowm;
     }
 }

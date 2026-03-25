@@ -1680,6 +1680,7 @@ __STATIC_INLINE uint32_t __NVIC_GetPriorityGrouping(void)
   \details Enables a device specific interrupt in the NVIC interrupt controller.
   \param [in]      IRQn  Device specific interrupt number.
   \note    IRQn must not be negative.
+
  */
 __STATIC_INLINE void __NVIC_EnableIRQ(IRQn_Type IRQn)
 {
