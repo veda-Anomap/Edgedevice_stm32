@@ -27,6 +27,7 @@ typedef struct {
 typedef struct {
     int32_t lag_samples;
     int32_t tau_us;
+    int32_t alpha_raw_deg_x10;
     int32_t alpha_deg_x10;
     uint16_t peak_main;
     uint16_t peak_second;

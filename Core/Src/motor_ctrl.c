@@ -9,7 +9,7 @@
 #define TDOA_GAIN_Q8      160U
 #define TDOA_ACCEL_UP_PWM   2U
 #define TDOA_ACCEL_DN_PWM   3U
-#define TDOA_SIGN           1
+#define TDOA_SIGN          -1
 
 static TIM_HandleTypeDef *s_htim = NULL;
 

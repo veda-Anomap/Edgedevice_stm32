@@ -34,6 +34,10 @@ static uint8_t rx_data_rpi = 0U;
 #define MANUAL_CMD_MIN_INTERVAL_MS 90U
 #define TDOA_FALLBACK_HOLD_MS 250U
 #define AUTO_VIEW_HOLD_MS 1000U
+#define AUTO_USE_DETECT_FALLBACK 0U
+#define TDIR_ENTER_X10 140
+#define TDIR_EXIT_X10  100
+#define TDIR_FLIP_X10  260
 #define UART1_RX_MIRROR_TO_UART2 0U
 #define UART1_MIRROR_PAYLOAD_MAX 96U
 
@@ -212,13 +216,14 @@ static void proto_uart1_tx_poll(void)
     }
 }
 
-static void proto_uart1_send_packet(uint8_t cmd, const char *json)
+static uint8_t proto_uart1_send_packet(uint8_t cmd, const char *json)
 {
-    (void)proto_uart1_enqueue_frame(cmd, json);
+    const uint8_t ok = proto_uart1_enqueue_frame(cmd, json);
     proto_uart1_tx_poll();
+    return ok;
 }
 
-static void proto_send_status_packet(void)
+static uint8_t proto_send_status_packet(void)
 {
     aht10_data_t th = {0};
     pcf8591_data_t light = {0};
@@ -255,7 +260,7 @@ static void proto_send_status_packet(void)
                    (long)tilt_deg,
                    (unsigned long)light.light_raw);
 
-    proto_uart1_send_packet(0x05U, json);
+    return proto_uart1_send_packet(0x05U, json);
 }
 
 static void proto_send_motor_ack(uint8_t ok, const char *cmd_text)
@@ -265,7 +270,7 @@ static void proto_send_motor_ack(uint8_t ok, const char *cmd_text)
     (void)snprintf(json, sizeof(json),
                    "{\"ok\":%u,\"mode\":\"%s\",\"cmd\":\"%s\"}",
                    (unsigned)ok, mode_str, (cmd_text != NULL) ? cmd_text : "");
-    proto_uart1_send_packet(0x04U, json);
+    (void)proto_uart1_send_packet(0x04U, json);
 }
 
 static void proto_publish_frame(uint8_t cmd, const uint8_t *payload, uint32_t len)
@@ -442,15 +447,21 @@ static void process_protocol_frame(uint8_t cmd, const uint8_t *payload, uint32_t
         if (len == 0U) {
             s_u1_status_req++;
             if ((now_ms - s_last_status_reply_ms) >= STATUS_REPLY_MIN_INTERVAL_MS) {
-                proto_send_status_packet();
-                s_last_status_reply_ms = now_ms;
-                s_status_reply_pending = 0U;
+                if (proto_send_status_packet() != 0U) {
+                    s_last_status_reply_ms = now_ms;
+                    s_status_reply_pending = 0U;
+                } else {
+                    /* TX queue full: keep pending for retry */
+                    s_status_reply_pending = 1U;
+                }
             } else {
                 s_status_reply_pending = 1U;
             }
         } else {
             s_u1_proto_invalid++;
-            proto_uart1_send_packet(0x05U, "");
+            if (proto_uart1_send_packet(0x05U, "") == 0U) {
+                s_status_reply_pending = 1U;
+            }
         }
         return;
     }
@@ -690,14 +701,34 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart1) {
+        uint8_t *next_ptr = NULL;
+        uint16_t next_len = 0U;
+
         __disable_irq();
         if (s_tx_q_count > 0U) {
             s_tx_q_tail = (uint8_t)((s_tx_q_tail + 1U) % PROTO_TX_QUEUE_LEN);
             s_tx_q_count--;
         }
         s_tx_busy = 0U;
-        s_tx_need_kick = (s_tx_q_count > 0U) ? 1U : 0U;
+        if (s_tx_q_count > 0U) {
+            next_ptr = s_tx_q[s_tx_q_tail].data;
+            next_len = s_tx_q[s_tx_q_tail].len;
+            s_tx_need_kick = 1U;
+        } else {
+            s_tx_need_kick = 0U;
+        }
         __enable_irq();
+
+        /* Keep TX continuous without waiting ControlTask period. */
+        if ((next_ptr != NULL) && (next_len > 0U)) {
+            if (HAL_UART_Transmit_IT(&huart1, next_ptr, next_len) == HAL_OK) {
+                s_tx_busy = 1U;
+                s_tx_need_kick = 0U;
+            } else {
+                s_u1_tx_it_fail++;
+                s_tx_need_kick = 1U;
+            }
+        }
     }
 }
 
@@ -741,22 +772,19 @@ void app_control_loop(void)
 
     if ((s_status_reply_pending != 0U) &&
         ((nowm - s_last_status_reply_ms) >= STATUS_REPLY_MIN_INTERVAL_MS)) {
-        proto_send_status_packet();
-        s_last_status_reply_ms = nowm;
-        s_status_reply_pending = 0U;
+        if (proto_send_status_packet() != 0U) {
+            s_last_status_reply_ms = nowm;
+            s_status_reply_pending = 0U;
+        }
     }
 
     /* Apply UART/protocol commands only in ControlTask */
     drain_control_queue(nowm);
 
     if (current_mode == MODE_AUTO) {
-        if ((auto_hold_src != 0U) && ((int32_t)(nowm - auto_hold_until_ms) < 0)) {
+        if ((auto_hold_src == 2U) && ((int32_t)(nowm - auto_hold_until_ms) < 0)) {
             s_auto_ctrl_src = 'H';
-            if (auto_hold_src == 1U) {
-                motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
-            } else if (auto_hold_src == 2U) {
-                motor_ctrl_process(nowm, auto_hold_dir);
-            }
+            motor_ctrl_process(nowm, auto_hold_dir);
             return;
         }
 
@@ -770,13 +798,13 @@ void app_control_loop(void)
             last_tdoa_ok_ms = nowm;
             s_auto_ctrl_src = 'T';
             auto_hold_angle_x10 = tdbg.alpha_deg_x10;
-            auto_hold_src = 1U;
-            auto_hold_until_ms = nowm + AUTO_VIEW_HOLD_MS;
+            auto_hold_src = 0U;
+            auto_hold_until_ms = 0U;
             motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
         } else if ((nowm - last_tdoa_ok_ms) <= TDOA_FALLBACK_HOLD_MS) {
             s_auto_ctrl_src = 'T';
             /* keep last tdoa-tracked position for a short hold window */
-        } else if (mic_is_calibrated()) {
+        } else if ((AUTO_USE_DETECT_FALLBACK != 0U) && mic_is_calibrated()) {
             s_auto_ctrl_src = 'D';
             const uint32_t lock_until_ms = motor_ctrl_get_lock_until_ms();
             const char detect_dir = mic_process(nowm, lock_until_ms);
@@ -806,6 +834,7 @@ void app_sensor_loop(void)
     pcf8591_process(nowm);
 
     static uint32_t last_dbg = 0U;
+    static int8_t tdir_log_state = 0; /* -1:L, 0:C, +1:R */
     if (nowm - last_dbg >= 500U) {
         mic_debug_t dbg = {0};
         mic_tdoa_debug_t tdbg = {0};
@@ -824,13 +853,20 @@ void app_sensor_loop(void)
         }
         mic_get_tdoa_debug(&tdbg);
         if (tdbg.valid != 0U) {
-            if (tdbg.alpha_deg_x10 > 30) {
-                tdoa_dir = 'R';
-            } else if (tdbg.alpha_deg_x10 < -30) {
-                tdoa_dir = 'L';
+            const int32_t a = tdbg.alpha_deg_x10;
+            if (tdir_log_state == 0) {
+                if (a >= TDIR_ENTER_X10) tdir_log_state = 1;
+                else if (a <= -TDIR_ENTER_X10) tdir_log_state = -1;
+            } else if (tdir_log_state > 0) {
+                if (a <= -TDIR_FLIP_X10) tdir_log_state = -1;
+                else if (a < TDIR_EXIT_X10) tdir_log_state = 0;
             } else {
-                tdoa_dir = 'C';
+                if (a >= TDIR_FLIP_X10) tdir_log_state = 1;
+                else if (a > -TDIR_EXIT_X10) tdir_log_state = 0;
             }
+            tdoa_dir = (tdir_log_state > 0) ? 'R' : ((tdir_log_state < 0) ? 'L' : 'C');
+        } else {
+            tdir_log_state = 0;
         }
         aht10_get_data(&th);
         pcf8591_get_data(&light);
@@ -838,14 +874,16 @@ void app_sensor_loop(void)
         const int32_t temp_abs = (th.temperature_c_x100 < 0) ? -th.temperature_c_x100 : th.temperature_c_x100;
         const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
-        /* LOC_A is computed from tau via alpha = asin(tau/tau_max) in mic_tdoa_process(). */
-        printf("I2S_L:%5lu I2S_R:%5lu | FINAL_L:%4lu FINAL_R:%4lu | DET:%c TDIR:%c TV:%u CONF:%u | "
-               "PAN:%3lddeg TILT:%3lddeg | LOC_A:%+ld.%01lddeg TAU:%+ldus LAG:%+ld | "
+        /* RAW_A: instantaneous angle from current frame, LOC_A: filtered control angle */
+        printf("I2S_L:%5lu I2S_R:%5lu | FINAL_L:%4lu FINAL_R:%4lu | DET:%c TDIR:%c TV:%u CONF:%u SRC:%c | "
+               "PAN:%3lddeg TILT:%3lddeg | RAW_A:%+ld.%01lddeg LOC_A:%+ld.%01lddeg TAU:%+ldus LAG:%+ld | "
                "T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu\r\n",
                (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
-               detect_dir, tdoa_dir, (unsigned)tdbg.valid, (unsigned)tdbg.confidence_q8,
+               detect_dir, tdoa_dir, (unsigned)tdbg.valid, (unsigned)tdbg.confidence_q8, s_auto_ctrl_src,
                (long)pan_deg, (long)tilt_deg,
+               (long)(tdbg.alpha_raw_deg_x10 / 10),
+               (long)((tdbg.alpha_raw_deg_x10 < 0) ? -(tdbg.alpha_raw_deg_x10 % 10) : (tdbg.alpha_raw_deg_x10 % 10)),
                (long)(tdbg.alpha_deg_x10 / 10),
                (long)((tdbg.alpha_deg_x10 < 0) ? -(tdbg.alpha_deg_x10 % 10) : (tdbg.alpha_deg_x10 % 10)),
                (long)tdbg.tau_us,
