@@ -597,6 +597,11 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
 #endif
 
 #ifdef HAL_I2S_MODULE_ENABLED
+void HAL_I2S_RxHalfCpltCallback(I2S_HandleTypeDef *hi2s)
+{
+    mic_on_i2s_rx_half_complete(hi2s);
+}
+
 void HAL_I2S_RxCpltCallback(I2S_HandleTypeDef *hi2s)
 {
     mic_on_i2s_rx_complete(hi2s);

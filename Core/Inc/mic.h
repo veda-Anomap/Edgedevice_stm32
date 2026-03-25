@@ -40,6 +40,7 @@ void mic_init(void);
 void mic_on_dma_complete(ADC_HandleTypeDef *hadc);
 #endif
 #ifdef HAL_I2S_MODULE_ENABLED
+void mic_on_i2s_rx_half_complete(I2S_HandleTypeDef *hi2s);
 void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s);
 #endif
 char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms);

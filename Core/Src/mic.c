@@ -392,17 +392,18 @@ static inline int32_t inmp441_unpack_s24(uint16_t hi, uint16_t lo)
     return inmp441_sign_extend24(x24);
 }
 
-void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
+static void mic_on_i2s_rx_segment(const uint16_t *src, uint32_t halfword_len)
 {
-    if (hi2s != &hi2s2) return;
+    if (src == NULL || halfword_len < 4U) return;
+    if ((halfword_len & 0x3U) != 0U) return;
 
     static uint16_t frame_u16[I2S_DMA_HALFWORD_LEN / 2U];
     uint32_t out = 0U;
 
     /* halfword stream layout: [L_hi L_lo R_hi R_lo ...] */
-    for (uint32_t i = 0U; (i + 3U) < I2S_DMA_HALFWORD_LEN; i += 4U) {
-        int32_t l16 = inmp441_unpack_s24(i2s_buffer[i], i2s_buffer[i + 1U]) >> 8;
-        int32_t r16 = inmp441_unpack_s24(i2s_buffer[i + 2U], i2s_buffer[i + 3U]) >> 8;
+    for (uint32_t i = 0U; (i + 3U) < halfword_len; i += 4U) {
+        int32_t l16 = inmp441_unpack_s24(src[i], src[i + 1U]) >> 8;
+        int32_t r16 = inmp441_unpack_s24(src[i + 2U], src[i + 3U]) >> 8;
 
         /* Slowly track DC bias and remove it from each channel. */
         dc_offset_l += (l16 - dc_offset_l) >> DC_TRACK_SHIFT;
@@ -434,6 +435,18 @@ void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
         }
     }
     mic_process_interleaved_u16(frame_u16, out);
+}
+
+void mic_on_i2s_rx_half_complete(I2S_HandleTypeDef *hi2s)
+{
+    if (hi2s != &hi2s2) return;
+    mic_on_i2s_rx_segment(i2s_buffer, I2S_DMA_HALFWORD_LEN / 2U);
+}
+
+void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
+{
+    if (hi2s != &hi2s2) return;
+    mic_on_i2s_rx_segment(&i2s_buffer[I2S_DMA_HALFWORD_LEN / 2U], I2S_DMA_HALFWORD_LEN / 2U);
 }
 #endif
 
