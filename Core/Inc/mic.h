@@ -43,6 +43,7 @@ void mic_on_dma_complete(ADC_HandleTypeDef *hadc);
 #ifdef HAL_I2S_MODULE_ENABLED
 void mic_on_i2s_rx_half_complete(I2S_HandleTypeDef *hi2s);
 void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s);
+void mic_i2s_drain(uint8_t max_segments);
 #endif
 char mic_process(uint32_t now_ms, uint32_t motor_lock_until_ms);
 uint8_t mic_is_calibrated(void);
@@ -53,3 +54,4 @@ void mic_tdoa_enable(uint8_t enable);
 void mic_tdoa_process(uint32_t now_ms);
 uint8_t mic_tdoa_is_valid(void);
 void mic_get_tdoa_debug(mic_tdoa_debug_t *out);
+uint32_t mic_get_i2s_seg_drop_count(void);

@@ -12,7 +12,14 @@ static uint16_t adc_buffer[ADC_BUF_LEN];
 /* INMP441 DMA input: 16-bit halfword stream from I2S peripheral */
 #define I2S_DMA_WORD_LEN     200U
 #define I2S_DMA_HALFWORD_LEN (I2S_DMA_WORD_LEN * 2U)
+#define I2S_SEG_HALFWORD_LEN (I2S_DMA_HALFWORD_LEN / 2U)
+#define I2S_SEG_QUEUE_LEN    8U
 static uint16_t i2s_buffer[I2S_DMA_HALFWORD_LEN];
+static uint16_t i2s_seg_queue[I2S_SEG_QUEUE_LEN][I2S_SEG_HALFWORD_LEN];
+static volatile uint8_t i2s_seg_q_head = 0U;
+static volatile uint8_t i2s_seg_q_tail = 0U;
+static volatile uint8_t i2s_seg_q_count = 0U;
+static volatile uint32_t i2s_seg_q_drop = 0U;
 static int32_t dc_offset_l = 0;
 static int32_t dc_offset_r = 0;
 extern I2S_HandleTypeDef hi2s2;
@@ -38,29 +45,32 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_FRAME_N              (TDOA_HALF_N * 2U)
 #define TDOA_FS_HZ                16000U
 #define TDOA_LAG_MAX              8
-#define TDOA_VAD_MEANABS_TH       320U
+#define TDOA_VAD_MEANABS_TH       360U
 #define TDOA_COARSE_MAX_DEG_X10   750
-#define TDOA_MIC_DISTANCE_MM      120.0f
+#define TDOA_MIC_DISTANCE_MM      100.0f
 #define TDOA_SOUND_SPEED_MM_S     343000.0f
 #define TDOA_PHAT_EPS             1.0e-9f
 #define TDOA_PI_F                 3.14159265358979323846f
 #define TDOA_LAG_MARGIN_SAMPLES   1
 #define TDOA_PROCESS_PERIOD_MS    20U
 #define TDOA_STALE_INVALID_MS     300U
+#define TDOA_PRECHECK_LEVEL_TH    140U
 /* Stage-4 stabilization: confidence hysteresis + hold + EMA + slew limit */
-#define TDOA_CONF_ON_Q8           320U
-#define TDOA_CONF_OFF_Q8          240U
+#define TDOA_CONF_ON_Q8           304U
+#define TDOA_CONF_OFF_Q8          224U
+#define TDOA_CONF_EXCLUDE_NEIGHBOR 1
 #define TDOA_VALID_HOLD_MS        800U
 #define TDOA_EMA_ALPHA_Q8         80U
 #define TDOA_MAX_STEP_DEG_X10     120
 #define TDOA_ANGLE_CLAMP_DEG_X10  900
 #define TDOA_SAMPLE_CLAMP_ABS     6000
-#define TDOA_CH_RATIO_MAX_Q8      3072U /* ~12.0x */
-#define TDOA_DIR_ENTER_X10        90
-#define TDOA_DIR_FLIP_X10         180
+#define TDOA_CH_RATIO_MAX_Q8      3584U /* ~14.0x */
+#define TDOA_DIR_ENTER_X10        50
+#define TDOA_DIR_FLIP_X10         140
 #define TDOA_DIR_FLIP_CONFIRM     3U
 #define TDOA_DIR_ENTER_CONFIRM    1U
 #define TDOA_INPUT_SWAP_LR        0U
+#define TDOA_USE_CMSIS_DSP        0U
 
 /* Shared states updated in ISR context */
 static volatile uint32_t lvlL = 0U, lvlR = 0U;
@@ -100,6 +110,24 @@ static uint32_t tdoa_last_proc_ms = 0U;
 static uint32_t tdoa_last_result_ms = 0U;
 static float tdoa_hann[TDOA_FRAME_N];
 static uint8_t tdoa_hann_ready = 0U;
+#if TDOA_USE_CMSIS_DSP
+static arm_cfft_instance_f32 tdoa_cfft_inst;
+static uint8_t tdoa_cfft_ready = 0U;
+static float tdoa_fft_io[2U * TDOA_FRAME_N];
+#endif
+
+#if TDOA_USE_CMSIS_DSP
+/*
+ * Keep CMSIS-DSP transform implementation in mic.o to avoid link-time
+ * dependency on IDE-generated object lists under Debug/.
+ */
+#include "../../Drivers/CMSIS/DSP/Source/CommonTables/arm_common_tables.c"
+#include "../../Drivers/CMSIS/DSP/Source/CommonTables/arm_const_structs.c"
+#include "../../Drivers/CMSIS/DSP/Source/TransformFunctions/arm_bitreversal2.c"
+#include "../../Drivers/CMSIS/DSP/Source/TransformFunctions/arm_cfft_radix8_f32.c"
+#include "../../Drivers/CMSIS/DSP/Source/TransformFunctions/arm_cfft_f32.c"
+#include "../../Drivers/CMSIS/DSP/Source/TransformFunctions/arm_cfft_init_f32.c"
+#endif
 
 /* Direction state */
 static char detectLR = '-';
@@ -161,6 +189,83 @@ static inline int32_t tdoa_clamp_abs_i32(int32_t v, int32_t abs_max)
     return v;
 }
 
+static inline uint32_t mic_enter_critical(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    __DMB();
+    return primask;
+}
+
+static inline void mic_exit_critical(uint32_t primask)
+{
+    __DMB();
+    if (primask == 0U) {
+        __enable_irq();
+    }
+}
+
+#ifdef HAL_I2S_MODULE_ENABLED
+static void mic_on_i2s_rx_segment(const uint16_t *src, uint32_t halfword_len);
+
+static void mic_i2s_seg_queue_reset(void)
+{
+    i2s_seg_q_head = 0U;
+    i2s_seg_q_tail = 0U;
+    i2s_seg_q_count = 0U;
+    i2s_seg_q_drop = 0U;
+    memset(i2s_seg_queue, 0, sizeof(i2s_seg_queue));
+}
+
+static void mic_i2s_seg_enqueue_isr(const uint16_t *src)
+{
+    if (src == NULL) return;
+
+    if (i2s_seg_q_count >= I2S_SEG_QUEUE_LEN) {
+        i2s_seg_q_drop++;
+        return;
+    }
+
+    const uint8_t tail = i2s_seg_q_tail;
+    memcpy(i2s_seg_queue[tail], src, sizeof(i2s_seg_queue[tail]));
+    __DMB();
+
+    i2s_seg_q_tail = (uint8_t)((tail + 1U) % I2S_SEG_QUEUE_LEN);
+    i2s_seg_q_count++;
+}
+
+void mic_i2s_drain(uint8_t max_segments)
+{
+    if (max_segments == 0U) return;
+
+    static uint16_t seg_copy[I2S_SEG_HALFWORD_LEN];
+    uint8_t processed = 0U;
+    while (processed < max_segments) {
+        uint8_t head;
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        if (i2s_seg_q_count == 0U) {
+            if (primask == 0U) {
+                __enable_irq();
+            }
+            break;
+        }
+
+        head = i2s_seg_q_head;
+        memcpy(seg_copy, i2s_seg_queue[head], sizeof(seg_copy));
+        i2s_seg_q_head = (uint8_t)((head + 1U) % I2S_SEG_QUEUE_LEN);
+        i2s_seg_q_count--;
+
+        if (primask == 0U) {
+            __enable_irq();
+        }
+
+        mic_on_i2s_rx_segment(seg_copy, I2S_SEG_HALFWORD_LEN);
+        processed++;
+    }
+}
+#endif
+
 static int32_t tdoa_effective_lag_max(void)
 {
     /* Physical max delay in samples: fs * d / c, plus small search margin. */
@@ -179,6 +284,13 @@ static void tdoa_prepare_hann(void)
     for (uint32_t n = 0U; n < TDOA_FRAME_N; n++) {
         tdoa_hann[n] = 0.5f - (0.5f * cosf((2.0f * TDOA_PI_F * (float)n) / den));
     }
+#if TDOA_USE_CMSIS_DSP
+    if (arm_cfft_init_f32(&tdoa_cfft_inst, TDOA_FRAME_N) == ARM_MATH_SUCCESS) {
+        tdoa_cfft_ready = 1U;
+    } else {
+        tdoa_cfft_ready = 0U;
+    }
+#endif
     tdoa_hann_ready = 1U;
 }
 
@@ -256,20 +368,55 @@ static void tdoa_fft_c128_inplace(float *xr, float *xi, uint8_t inverse)
 
 static void tdoa_fft_real_windowed_128(const int16_t *x, const float *win, float *xr, float *xi)
 {
-    const uint32_t N = TDOA_FRAME_N;
-    for (uint32_t n = 0U; n < N; n++) {
-        float xn = (float)x[n];
-        if (win != NULL) {
-            xn *= win[n];
+#if TDOA_USE_CMSIS_DSP
+    if (tdoa_cfft_ready != 0U) {
+        const uint32_t N = TDOA_FRAME_N;
+        for (uint32_t n = 0U; n < N; n++) {
+            float xn = (float)x[n];
+            if (win != NULL) {
+                xn *= win[n];
+            }
+            tdoa_fft_io[2U * n] = xn;
+            tdoa_fft_io[(2U * n) + 1U] = 0.0f;
         }
-        xr[n] = xn;
-        xi[n] = 0.0f;
+        arm_cfft_f32(&tdoa_cfft_inst, tdoa_fft_io, 0U, 1U);
+        for (uint32_t n = 0U; n < N; n++) {
+            xr[n] = tdoa_fft_io[2U * n];
+            xi[n] = tdoa_fft_io[(2U * n) + 1U];
+        }
+        return;
     }
-    tdoa_fft_c128_inplace(xr, xi, 0U);
+#endif
+    {
+        const uint32_t N = TDOA_FRAME_N;
+        for (uint32_t n = 0U; n < N; n++) {
+            float xn = (float)x[n];
+            if (win != NULL) {
+                xn *= win[n];
+            }
+            xr[n] = xn;
+            xi[n] = 0.0f;
+        }
+        tdoa_fft_c128_inplace(xr, xi, 0U);
+    }
 }
 
 static void tdoa_ifft_phat_to_corr_abs(float *gr, float *gi, float *corr_abs)
 {
+#if TDOA_USE_CMSIS_DSP
+    if (tdoa_cfft_ready != 0U) {
+        for (uint32_t n = 0U; n < TDOA_FRAME_N; n++) {
+            tdoa_fft_io[2U * n] = gr[n];
+            tdoa_fft_io[(2U * n) + 1U] = gi[n];
+        }
+        arm_cfft_f32(&tdoa_cfft_inst, tdoa_fft_io, 1U, 1U);
+        for (int32_t lag = -TDOA_LAG_MAX; lag <= TDOA_LAG_MAX; lag++) {
+            const uint32_t idx = (lag >= 0) ? (uint32_t)lag : (uint32_t)(TDOA_FRAME_N + lag);
+            corr_abs[lag + TDOA_LAG_MAX] = fabsf(tdoa_fft_io[2U * idx]);
+        }
+        return;
+    }
+#endif
     tdoa_fft_c128_inplace(gr, gi, 1U);
 
     for (int32_t lag = -TDOA_LAG_MAX; lag <= TDOA_LAG_MAX; lag++) {
@@ -364,6 +511,10 @@ static void mic_reset_state(void)
 #ifdef HAL_I2S_MODULE_ENABLED
     dc_offset_l = 0;
     dc_offset_r = 0;
+    mic_i2s_seg_queue_reset();
+#endif
+#if TDOA_USE_CMSIS_DSP
+    tdoa_cfft_ready = 0U;
 #endif
 }
 
@@ -522,6 +673,7 @@ static void mic_on_i2s_rx_segment(const uint16_t *src, uint32_t halfword_len)
             const uint8_t wr = tdoa_ready_wr_idx;
             memcpy(tdoa_ready_l[wr], tdoa_acc_l, sizeof(tdoa_acc_l));
             memcpy(tdoa_ready_r[wr], tdoa_acc_r, sizeof(tdoa_acc_r));
+            __DMB();
             tdoa_ready_pub_idx = wr;
             tdoa_ready_seq++;
             tdoa_ready_wr_idx = (uint8_t)((wr + 1U) & 0x1U);
@@ -534,13 +686,13 @@ static void mic_on_i2s_rx_segment(const uint16_t *src, uint32_t halfword_len)
 void mic_on_i2s_rx_half_complete(I2S_HandleTypeDef *hi2s)
 {
     if (hi2s != &hi2s2) return;
-    mic_on_i2s_rx_segment(i2s_buffer, I2S_DMA_HALFWORD_LEN / 2U);
+    mic_i2s_seg_enqueue_isr(i2s_buffer);
 }
 
 void mic_on_i2s_rx_complete(I2S_HandleTypeDef *hi2s)
 {
     if (hi2s != &hi2s2) return;
-    mic_on_i2s_rx_segment(&i2s_buffer[I2S_DMA_HALFWORD_LEN / 2U], I2S_DMA_HALFWORD_LEN / 2U);
+    mic_i2s_seg_enqueue_isr(&i2s_buffer[I2S_DMA_HALFWORD_LEN / 2U]);
 }
 #endif
 
@@ -586,6 +738,7 @@ void mic_get_debug(mic_debug_t *out)
 {
     if (out == NULL) return;
 
+    const uint32_t primask = mic_enter_critical();
     out->adc_avg_l = adcAvgL;
     out->adc_avg_r = adcAvgR;
     out->peak_l = peakL;
@@ -602,6 +755,7 @@ void mic_get_debug(mic_debug_t *out)
     out->gate_ratio = gate_ratio_dbg;
     out->noise_ready = noise_ready;
     out->detect_dir = detectLR;
+    mic_exit_critical(primask);
 }
 
 void mic_tdoa_enable(uint8_t enable)
@@ -683,6 +837,20 @@ void mic_tdoa_process(uint32_t now_ms)
     memcpy(tdoa_prev_l, cur_l, sizeof(tdoa_prev_l));
     memcpy(tdoa_prev_r, cur_r, sizeof(tdoa_prev_r));
 
+    /* Stage-9: quick quiet precheck to skip heavy FFT when no meaningful sound. */
+    if ((tdoa_track_valid == 0U) && (lvlL < TDOA_PRECHECK_LEVEL_TH) && (lvlR < TDOA_PRECHECK_LEVEL_TH)) {
+        tdoa_dbg.vad_pass = 0U;
+        tdoa_dbg.valid = 0U;
+        tdoa_dbg.lag_samples = 0;
+        tdoa_dbg.tau_us = 0;
+        tdoa_dbg.alpha_raw_deg_x10 = 0;
+        tdoa_dbg.alpha_deg_x10 = 0;
+        tdoa_dbg.peak_main = 0U;
+        tdoa_dbg.peak_second = 0U;
+        tdoa_dbg.confidence_q8 = 0U;
+        return;
+    }
+
     uint32_t mean_abs = 0U;
     uint32_t mean_abs_l = 0U;
     uint32_t mean_abs_r = 0U;
@@ -751,12 +919,24 @@ void mic_tdoa_process(uint32_t now_ms)
 
     for (int32_t lag = -lag_max; lag <= lag_max; lag++) {
         const float a = corr_abs[lag + TDOA_LAG_MAX];
-
         if (a > best_peak) {
-            second_peak = best_peak;
             best_peak = a;
             best_lag = lag;
-        } else if (a > second_peak) {
+        }
+    }
+
+    /* Confidence robustness: ignore bins adjacent to the main lobe.
+     * Without this, second_peak is often picked from best_lag +/- 1 and
+     * confidence gets underestimated in clean directional frames. */
+    for (int32_t lag = -lag_max; lag <= lag_max; lag++) {
+        int32_t d = lag - best_lag;
+        if (d < 0) d = -d;
+        if (d <= TDOA_CONF_EXCLUDE_NEIGHBOR) {
+            continue;
+        }
+
+        const float a = corr_abs[lag + TDOA_LAG_MAX];
+        if (a > second_peak) {
             second_peak = a;
         }
     }
@@ -926,6 +1106,20 @@ uint8_t mic_tdoa_is_valid(void)
 void mic_get_tdoa_debug(mic_tdoa_debug_t *out)
 {
     if (out == NULL) return;
+    const uint32_t primask = mic_enter_critical();
     *out = tdoa_dbg;
+    mic_exit_critical(primask);
+}
+
+uint32_t mic_get_i2s_seg_drop_count(void)
+{
+#ifdef HAL_I2S_MODULE_ENABLED
+    const uint32_t primask = mic_enter_critical();
+    const uint32_t drop = i2s_seg_q_drop;
+    mic_exit_critical(primask);
+    return drop;
+#else
+    return 0U;
+#endif
 }
 

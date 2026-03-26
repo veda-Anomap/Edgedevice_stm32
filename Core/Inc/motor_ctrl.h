@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 /* PAN (left-right) PWM range */
-#define PAN_LEFT    1210U
-#define PAN_RIGHT   1810U
+#define PAN_LEFT    1010U
+#define PAN_RIGHT   2010U
 #define PAN_CENTER  1510U
 
 /* TILT (up-down) PWM range */

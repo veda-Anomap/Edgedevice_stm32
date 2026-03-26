@@ -128,11 +128,10 @@ void motor_ctrl_track_pan_tdoa(uint32_t now_ms, int32_t angle_deg_x10)
         write_pan(current_pan_pwm);
     }
 
-    /* While TDOA tracking is active, disable old one-shot auto state machine. */
+    /* While TDOA tracking is active, disable one-shot auto moves.
+     * Keep lock timer/last_dir so source switching does not jitter. */
     pending_dir = '-';
     motor_running = 0U;
-    motor_lock_until_ms = 0U;
-    last_dir = '-';
 }
 
 void motor_ctrl_enter_manual(void)

@@ -33,9 +33,11 @@ static uint8_t rx_data_rpi = 0U;
 #define STATUS_REPLY_MIN_INTERVAL_MS 100U
 #define MANUAL_CMD_MIN_INTERVAL_MS 90U
 #define TDOA_FALLBACK_HOLD_MS 250U
+#define TDOA_LOST_CONFIRM_CYCLES 3U
 #define AUTO_VIEW_HOLD_MS 1000U
 #define AUTO_USE_DETECT_FALLBACK 1U
-#define TDOA_OK_MIN_ABS_X10 120
+#define TDOA_OK_MIN_ABS_X10 50
+#define TDOA_STRONG_CONFIRM_CYCLES 2U
 #define TDIR_ENTER_X10 90
 #define TDIR_EXIT_X10  60
 #define TDIR_FLIP_X10  180
@@ -756,10 +758,17 @@ void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
     static uint32_t last_tdoa_ok_ms = 0U;
+    static uint8_t tdoa_strong_confirm = 0U;
+    static uint8_t tdoa_lost_confirm = 0U;
     static uint32_t auto_hold_until_ms = 0U;
     static int32_t auto_hold_angle_x10 = 0;
     static char auto_hold_dir = '-';
     static uint8_t auto_hold_src = 0U; /* 0:none, 1:tdoa, 2:detect_dir */
+
+#ifdef HAL_I2S_MODULE_ENABLED
+    /* Keep ISR short: consume queued I2S DMA segments in task context. */
+    mic_i2s_drain(4U);
+#endif
 
     if (current_mode == MODE_AUTO) {
         mic_tdoa_process(nowm);
@@ -783,14 +792,24 @@ void app_control_loop(void)
     drain_control_queue(nowm);
 
     if (current_mode == MODE_AUTO) {
-        if ((auto_hold_src == 2U) && ((int32_t)(nowm - auto_hold_until_ms) < 0)) {
-            s_auto_ctrl_src = 'H';
-            motor_ctrl_process(nowm, auto_hold_dir);
-            return;
+        /* Hold behavior:
+         * - src=1(TDOA): keep looking at last latched loud-direction angle.
+         * - src=2(DETECT): keep short fallback direction hold. */
+        if ((int32_t)(nowm - auto_hold_until_ms) < 0) {
+            if (auto_hold_src == 1U) {
+                s_auto_ctrl_src = 'H';
+                motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
+                return;
+            }
+            if (auto_hold_src == 2U) {
+                s_auto_ctrl_src = 'H';
+                motor_ctrl_process(nowm, auto_hold_dir);
+                return;
+            }
+        } else {
+            auto_hold_src = 0U;
+            auto_hold_dir = '-';
         }
-
-        auto_hold_src = 0U;
-        auto_hold_dir = '-';
 
         mic_tdoa_debug_t tdbg = {0};
         mic_get_tdoa_debug(&tdbg);
@@ -800,16 +819,36 @@ void app_control_loop(void)
         const uint8_t tdoa_strong_ok = ((tdbg.valid != 0U) && (tdoa_abs_x10 >= TDOA_OK_MIN_ABS_X10)) ? 1U : 0U;
 
         if (tdoa_strong_ok != 0U) {
+            if (tdoa_strong_confirm < TDOA_STRONG_CONFIRM_CYCLES) {
+                tdoa_strong_confirm++;
+            }
+            if (tdoa_strong_confirm < TDOA_STRONG_CONFIRM_CYCLES) {
+                s_auto_ctrl_src = 'T';
+                return;
+            }
+            tdoa_lost_confirm = 0U;
             last_tdoa_ok_ms = nowm;
             s_auto_ctrl_src = 'T';
-            auto_hold_angle_x10 = tdbg.alpha_deg_x10;
-            auto_hold_src = 0U;
-            auto_hold_until_ms = 0U;
+            /* Latch once, then hold for AUTO_VIEW_HOLD_MS.
+             * This intentionally avoids continuous tracking jitter. */
+            if (auto_hold_src != 1U) {
+                auto_hold_angle_x10 = tdbg.alpha_deg_x10;
+                auto_hold_src = 1U;
+                auto_hold_until_ms = nowm + AUTO_VIEW_HOLD_MS;
+            }
             motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
         } else if ((tdbg.valid != 0U) && ((nowm - last_tdoa_ok_ms) <= TDOA_FALLBACK_HOLD_MS)) {
+            tdoa_strong_confirm = 0U;
+            tdoa_lost_confirm = 0U;
             s_auto_ctrl_src = 'T';
             /* keep last tdoa-tracked position for a short hold window */
         } else if ((AUTO_USE_DETECT_FALLBACK != 0U) && mic_is_calibrated()) {
+            tdoa_strong_confirm = 0U;
+            if (tdoa_lost_confirm < TDOA_LOST_CONFIRM_CYCLES) {
+                tdoa_lost_confirm++;
+                s_auto_ctrl_src = 'T';
+                return;
+            }
             s_auto_ctrl_src = 'D';
             const uint32_t lock_until_ms = motor_ctrl_get_lock_until_ms();
             const char detect_dir = mic_process(nowm, lock_until_ms);
@@ -820,9 +859,12 @@ void app_control_loop(void)
                 auto_hold_until_ms = nowm + AUTO_VIEW_HOLD_MS;
             }
         } else {
+            tdoa_strong_confirm = 0U;
             s_auto_ctrl_src = '-';
         }
     } else {
+        tdoa_strong_confirm = 0U;
+        tdoa_lost_confirm = 0U;
         auto_hold_src = 0U;
         auto_hold_dir = '-';
         auto_hold_until_ms = 0U;
@@ -849,6 +891,7 @@ void app_sensor_loop(void)
         const uint16_t tilt_pwm = motor_ctrl_get_tilt_pwm();
         const int32_t pan_deg = pwm_to_deg(pan_pwm, PAN_LEFT, PAN_RIGHT);
         const int32_t tilt_deg = pwm_to_deg(tilt_pwm, TILT_UP, TILT_DOWN);
+        const uint32_t i2s_drop = mic_get_i2s_seg_drop_count();
         char detect_dir = '-';
         char tdoa_dir = '-';
 
@@ -880,12 +923,13 @@ void app_sensor_loop(void)
         const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
         /* RAW_A: instantaneous angle from current frame, LOC_A: filtered control angle */
-        printf("I2S_L:%5lu I2S_R:%5lu | FINAL_L:%4lu FINAL_R:%4lu | DET:%c TDIR:%c VAD:%u TV:%u CONF:%u SRC:%c | "
+        printf("I2S_L:%5lu I2S_R:%5lu | FINAL_L:%4lu FINAL_R:%4lu | DET:%c TDIR:%c VAD:%u TV:%u CONF:%u SRC:%c DROP:%lu | "
                "PAN:%3lddeg TILT:%3lddeg | RAW_A:%+ld.%01lddeg LOC_A:%+ld.%01lddeg TAU:%+ldus LAG:%+ld | "
                "T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu\r\n",
                (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
                detect_dir, tdoa_dir, (unsigned)tdbg.vad_pass, (unsigned)tdbg.valid, (unsigned)tdbg.confidence_q8, s_auto_ctrl_src,
+               (unsigned long)i2s_drop,
                (long)pan_deg, (long)tilt_deg,
                (long)(tdbg.alpha_raw_deg_x10 / 10),
                (long)((tdbg.alpha_raw_deg_x10 < 0) ? -(tdbg.alpha_raw_deg_x10 % 10) : (tdbg.alpha_raw_deg_x10 % 10)),
