@@ -34,10 +34,11 @@ static uint8_t rx_data_rpi = 0U;
 #define MANUAL_CMD_MIN_INTERVAL_MS 90U
 #define TDOA_FALLBACK_HOLD_MS 250U
 #define AUTO_VIEW_HOLD_MS 1000U
-#define AUTO_USE_DETECT_FALLBACK 0U
-#define TDIR_ENTER_X10 140
-#define TDIR_EXIT_X10  100
-#define TDIR_FLIP_X10  260
+#define AUTO_USE_DETECT_FALLBACK 1U
+#define TDOA_OK_MIN_ABS_X10 120
+#define TDIR_ENTER_X10 90
+#define TDIR_EXIT_X10  60
+#define TDIR_FLIP_X10  180
 #define UART1_RX_MIRROR_TO_UART2 0U
 #define UART1_MIRROR_PAYLOAD_MAX 96U
 
@@ -794,14 +795,18 @@ void app_control_loop(void)
         mic_tdoa_debug_t tdbg = {0};
         mic_get_tdoa_debug(&tdbg);
 
-        if (tdbg.valid != 0U) {
+        int32_t tdoa_abs_x10 = tdbg.alpha_deg_x10;
+        if (tdoa_abs_x10 < 0) tdoa_abs_x10 = -tdoa_abs_x10;
+        const uint8_t tdoa_strong_ok = ((tdbg.valid != 0U) && (tdoa_abs_x10 >= TDOA_OK_MIN_ABS_X10)) ? 1U : 0U;
+
+        if (tdoa_strong_ok != 0U) {
             last_tdoa_ok_ms = nowm;
             s_auto_ctrl_src = 'T';
             auto_hold_angle_x10 = tdbg.alpha_deg_x10;
             auto_hold_src = 0U;
             auto_hold_until_ms = 0U;
             motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
-        } else if ((nowm - last_tdoa_ok_ms) <= TDOA_FALLBACK_HOLD_MS) {
+        } else if ((tdbg.valid != 0U) && ((nowm - last_tdoa_ok_ms) <= TDOA_FALLBACK_HOLD_MS)) {
             s_auto_ctrl_src = 'T';
             /* keep last tdoa-tracked position for a short hold window */
         } else if ((AUTO_USE_DETECT_FALLBACK != 0U) && mic_is_calibrated()) {
@@ -875,12 +880,12 @@ void app_sensor_loop(void)
         const char temp_sign = (th.temperature_c_x100 < 0) ? '-' : '+';
 
         /* RAW_A: instantaneous angle from current frame, LOC_A: filtered control angle */
-        printf("I2S_L:%5lu I2S_R:%5lu | FINAL_L:%4lu FINAL_R:%4lu | DET:%c TDIR:%c TV:%u CONF:%u SRC:%c | "
+        printf("I2S_L:%5lu I2S_R:%5lu | FINAL_L:%4lu FINAL_R:%4lu | DET:%c TDIR:%c VAD:%u TV:%u CONF:%u SRC:%c | "
                "PAN:%3lddeg TILT:%3lddeg | RAW_A:%+ld.%01lddeg LOC_A:%+ld.%01lddeg TAU:%+ldus LAG:%+ld | "
                "T:%c%ld.%02ldC H:%lu.%02lu%% LIGHT:%3lu\r\n",
                (unsigned long)dbg.adc_avg_l, (unsigned long)dbg.adc_avg_r,
                (unsigned long)dbg.sig_l, (unsigned long)dbg.sig_r,
-               detect_dir, tdoa_dir, (unsigned)tdbg.valid, (unsigned)tdbg.confidence_q8, s_auto_ctrl_src,
+               detect_dir, tdoa_dir, (unsigned)tdbg.vad_pass, (unsigned)tdbg.valid, (unsigned)tdbg.confidence_q8, s_auto_ctrl_src,
                (long)pan_deg, (long)tilt_deg,
                (long)(tdbg.alpha_raw_deg_x10 / 10),
                (long)((tdbg.alpha_raw_deg_x10 < 0) ? -(tdbg.alpha_raw_deg_x10 % 10) : (tdbg.alpha_raw_deg_x10 % 10)),

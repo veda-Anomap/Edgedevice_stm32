@@ -38,7 +38,7 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_FRAME_N              (TDOA_HALF_N * 2U)
 #define TDOA_FS_HZ                16000U
 #define TDOA_LAG_MAX              8
-#define TDOA_VAD_MEANABS_TH       420U
+#define TDOA_VAD_MEANABS_TH       320U
 #define TDOA_COARSE_MAX_DEG_X10   750
 #define TDOA_MIC_DISTANCE_MM      120.0f
 #define TDOA_SOUND_SPEED_MM_S     343000.0f
@@ -48,18 +48,18 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_PROCESS_PERIOD_MS    20U
 #define TDOA_STALE_INVALID_MS     300U
 /* Stage-4 stabilization: confidence hysteresis + hold + EMA + slew limit */
-#define TDOA_CONF_ON_Q8           520U
-#define TDOA_CONF_OFF_Q8          380U
-#define TDOA_VALID_HOLD_MS        500U
-#define TDOA_EMA_ALPHA_Q8         64U
-#define TDOA_MAX_STEP_DEG_X10     80
+#define TDOA_CONF_ON_Q8           320U
+#define TDOA_CONF_OFF_Q8          240U
+#define TDOA_VALID_HOLD_MS        800U
+#define TDOA_EMA_ALPHA_Q8         80U
+#define TDOA_MAX_STEP_DEG_X10     120
 #define TDOA_ANGLE_CLAMP_DEG_X10  900
 #define TDOA_SAMPLE_CLAMP_ABS     6000
-#define TDOA_CH_RATIO_MAX_Q8      1536U /* ~6.0x */
-#define TDOA_DIR_ENTER_X10        140
-#define TDOA_DIR_FLIP_X10         260
-#define TDOA_DIR_FLIP_CONFIRM     4U
-#define TDOA_DIR_ENTER_CONFIRM    2U
+#define TDOA_CH_RATIO_MAX_Q8      3072U /* ~12.0x */
+#define TDOA_DIR_ENTER_X10        90
+#define TDOA_DIR_FLIP_X10         180
+#define TDOA_DIR_FLIP_CONFIRM     3U
+#define TDOA_DIR_ENTER_CONFIRM    1U
 #define TDOA_INPUT_SWAP_LR        0U
 
 /* Shared states updated in ISR context */
