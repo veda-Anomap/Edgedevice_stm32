@@ -38,6 +38,13 @@ static uint8_t rx_data_rpi = 0U;
 #define AUTO_USE_DETECT_FALLBACK 1U
 #define TDOA_OK_MIN_ABS_X10 50
 #define TDOA_STRONG_CONFIRM_CYCLES 2U
+#define EVENT_FASTPATH_ENABLE 1U
+#define EVENT_LEVEL_TH 1400U
+#define EVENT_RISE_TH 180U
+#define EVENT_COOLDOWN_MS 300U
+#define EVENT_HOLD_MS 700U
+#define EVENT_FALLBACK_ANGLE_X10 450
+#define EVENT_FALLBACK_RATIO_Q8 320U
 #define TDIR_ENTER_X10 90
 #define TDIR_EXIT_X10  60
 #define TDIR_FLIP_X10  180
@@ -758,6 +765,8 @@ void app_control_loop(void)
 {
     const uint32_t nowm = HAL_GetTick();
     static uint32_t last_tdoa_ok_ms = 0U;
+    static uint32_t last_event_ms = 0U;
+    static uint32_t prev_event_lvl = 0U;
     static uint8_t tdoa_strong_confirm = 0U;
     static uint8_t tdoa_lost_confirm = 0U;
     static uint32_t auto_hold_until_ms = 0U;
@@ -811,8 +820,59 @@ void app_control_loop(void)
             auto_hold_dir = '-';
         }
 
+        mic_debug_t mdbg = {0};
+        if (mic_is_calibrated()) {
+            mic_get_debug(&mdbg);
+        }
+        const uint8_t detect_active = ((mdbg.gate_sound != 0U) &&
+                                       (mdbg.gate_snr != 0U) &&
+                                       (mdbg.gate_ratio != 0U)) ? 1U : 0U;
+
         mic_tdoa_debug_t tdbg = {0};
         mic_get_tdoa_debug(&tdbg);
+
+#if EVENT_FASTPATH_ENABLE
+        {
+            const uint32_t event_lvl = (mdbg.peak_l > mdbg.peak_r) ? mdbg.peak_l : mdbg.peak_r;
+            const uint32_t event_rise = (event_lvl > prev_event_lvl) ? (event_lvl - prev_event_lvl) : 0U;
+            const uint8_t event_cool_ok = ((nowm - last_event_ms) >= EVENT_COOLDOWN_MS) ? 1U : 0U;
+            const uint8_t event_trigger = ((event_lvl >= EVENT_LEVEL_TH) &&
+                                           (event_rise >= EVENT_RISE_TH) &&
+                                           (event_cool_ok != 0U)) ? 1U : 0U;
+            prev_event_lvl = event_lvl;
+
+            int32_t event_angle_x10 = 0;
+            uint8_t event_angle_ok = 0U;
+            if (tdbg.valid != 0U) {
+                event_angle_x10 = tdbg.alpha_deg_x10;
+                event_angle_ok = 1U;
+            } else {
+                const uint32_t pL = mdbg.peak_l;
+                const uint32_t pR = mdbg.peak_r;
+                uint32_t hi = (pL > pR) ? pL : pR;
+                uint32_t lo = (pL > pR) ? pR : pL;
+                if (lo == 0U) lo = 1U;
+                const uint32_t ratio_q8 = (hi << 8) / lo;
+                if (ratio_q8 >= EVENT_FALLBACK_RATIO_Q8) {
+                    event_angle_x10 = (pL > pR) ? -EVENT_FALLBACK_ANGLE_X10 : EVENT_FALLBACK_ANGLE_X10;
+                    event_angle_ok = 1U;
+                }
+            }
+
+            if ((event_trigger != 0U) && (event_angle_ok != 0U)) {
+                auto_hold_angle_x10 = event_angle_x10;
+                auto_hold_src = 1U;
+                auto_hold_until_ms = nowm + EVENT_HOLD_MS;
+                last_event_ms = nowm;
+                tdoa_strong_confirm = 0U;
+                tdoa_lost_confirm = 0U;
+                last_tdoa_ok_ms = nowm;
+                s_auto_ctrl_src = 'E';
+                motor_ctrl_track_pan_tdoa(nowm, auto_hold_angle_x10);
+                return;
+            }
+        }
+#endif
 
         int32_t tdoa_abs_x10 = tdbg.alpha_deg_x10;
         if (tdoa_abs_x10 < 0) tdoa_abs_x10 = -tdoa_abs_x10;
@@ -849,6 +909,10 @@ void app_control_loop(void)
                 s_auto_ctrl_src = 'T';
                 return;
             }
+            if (detect_active == 0U) {
+                s_auto_ctrl_src = '-';
+                return;
+            }
             s_auto_ctrl_src = 'D';
             const uint32_t lock_until_ms = motor_ctrl_get_lock_until_ms();
             const char detect_dir = mic_process(nowm, lock_until_ms);
@@ -863,6 +927,7 @@ void app_control_loop(void)
             s_auto_ctrl_src = '-';
         }
     } else {
+        prev_event_lvl = 0U;
         tdoa_strong_confirm = 0U;
         tdoa_lost_confirm = 0U;
         auto_hold_src = 0U;

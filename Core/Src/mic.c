@@ -56,15 +56,15 @@ extern I2S_HandleTypeDef hi2s2;
 #define TDOA_STALE_INVALID_MS     300U
 #define TDOA_PRECHECK_LEVEL_TH    140U
 /* Stage-4 stabilization: confidence hysteresis + hold + EMA + slew limit */
-#define TDOA_CONF_ON_Q8           304U
-#define TDOA_CONF_OFF_Q8          224U
+#define TDOA_CONF_ON_Q8           320U
+#define TDOA_CONF_OFF_Q8          240U
 #define TDOA_CONF_EXCLUDE_NEIGHBOR 1
 #define TDOA_VALID_HOLD_MS        800U
 #define TDOA_EMA_ALPHA_Q8         80U
 #define TDOA_MAX_STEP_DEG_X10     120
 #define TDOA_ANGLE_CLAMP_DEG_X10  900
 #define TDOA_SAMPLE_CLAMP_ABS     6000
-#define TDOA_CH_RATIO_MAX_Q8      3584U /* ~14.0x */
+#define TDOA_CH_RATIO_MAX_Q8      4608U /* ~18.0x */
 #define TDOA_DIR_ENTER_X10        50
 #define TDOA_DIR_FLIP_X10         140
 #define TDOA_DIR_FLIP_CONFIRM     3U
